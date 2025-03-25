@@ -34,17 +34,46 @@ if (!fs.existsSync(USER_FILE)) {
   }));
 }
 
+// Group data storage
+const GROUP_DATA_FILE = path.join(DATA_DIR, 'groups.json');
+if (!fs.existsSync(GROUP_DATA_FILE)) {
+  fs.writeFileSync(GROUP_DATA_FILE, JSON.stringify({}));
+}
+
 // WhatsApp connections storage by user
 const waConnections = {};
 
 // User to WhatsApp session mapping
 const userSessions = {};
 
-// Group data storage
-const GROUP_DATA_FILE = path.join(DATA_DIR, 'groups.json');
-if (!fs.existsSync(GROUP_DATA_FILE)) {
-  fs.writeFileSync(GROUP_DATA_FILE, JSON.stringify({}));
-}
+// Save sessions to file on startup and changes
+const SESSION_MAPPING_FILE = path.join(DATA_DIR, 'session_mapping.json');
+
+// Load session mappings
+const loadSessionMappings = () => {
+  if (fs.existsSync(SESSION_MAPPING_FILE)) {
+    try {
+      const data = JSON.parse(fs.readFileSync(SESSION_MAPPING_FILE, 'utf8'));
+      return data;
+    } catch (error) {
+      console.error('Error loading session mappings:', error);
+      return {};
+    }
+  }
+  return {};
+};
+
+// Save session mappings
+const saveSessionMappings = () => {
+  fs.writeFileSync(SESSION_MAPPING_FILE, JSON.stringify(userSessions));
+};
+
+// Initialize session mappings
+const initialMappings = loadSessionMappings();
+Object.assign(userSessions, initialMappings);
+
+// Periodically save session mappings
+setInterval(saveSessionMappings, 60000); // Save every minute
 
 // Read user data
 const getUserData = () => {
@@ -210,9 +239,10 @@ const connectWithPairingCode = async (sessionId, ctx) => {
   if (state?.creds?.registered === false) {
     try {
       // Request pairing code with the phone number
-      const formattedNumber = sessionId.startsWith('62') 
-        ? sessionId 
-        : `62${sessionId.replace(/^0+/, '')}`;
+      const formattedNumber = sessionId.split('_')[0];
+      const phoneNumber = formattedNumber.startsWith('62') 
+        ? formattedNumber 
+        : `62${formattedNumber.replace(/^0+/, '')}`;
       
       // Send info message
       await ctx.reply('🔄 *Meminta Pairing Code dari server WhatsApp...*\nMohon tunggu sebentar.', {
@@ -220,7 +250,7 @@ const connectWithPairingCode = async (sessionId, ctx) => {
       });
       
       // Request pairing code
-      const pairingCode = await sock.requestPairingCode(formattedNumber);
+      const pairingCode = await sock.requestPairingCode(phoneNumber);
       
       if (pairingCode) {
         await ctx.reply(`🔑 *Kode Pairing Anda:*\n\n*${pairingCode}*\n\n_Masukkan kode ini di aplikasi WhatsApp Anda untuk menyelesaikan koneksi._`, {
@@ -894,7 +924,124 @@ bot.on(message('text'), async (ctx) => {
     });
     
     // Clear session
-    delete ctx.session.ad
+    delete ctx.session.addAdminMessageId;
+  }
+});
+
+// List admins command
+bot.command('admins', async (ctx) => {
+  if (!ctx.isAdmin) {
+    return await ctx.reply('⛔ Akses ditolak. Hanya admin yang dapat menggunakan fitur ini.');
+  }
+  
+  const userData = getUserData();
+  const admins = userData.admins;
+  
+  if (admins.length === 0) {
+    return await ctx.reply('❌ *Tidak ada admin yang terdaftar.*', {
+      parse_mode: 'Markdown'
+    });
+  }
+  
+  let message = '👑 *Daftar Admin Bot*\n\n';
+  admins.forEach((admin, index) => {
+    message += `${index + 1}. \`${admin}\`\n`;
+  });
+  
+  await ctx.replyWithMarkdown(message);
+});
+
+// Add premium user command
+bot.command('addprem', async (ctx) => {
+  if (!ctx.isAdmin) {
+    return await ctx.reply('⛔ Akses ditolak. Hanya admin yang dapat menggunakan fitur ini.');
+  }
+  
+  const message = await ctx.reply('👤 *Kirim User ID Telegram yang ingin dijadikan user premium:*\n_(Forward pesan dari user atau masukkan ID secara manual)_', {
+    parse_mode: 'Markdown',
+    reply_markup: {
+      force_reply: true
+    }
+  });
+  
+  ctx.session = {
+    ...ctx.session,
+    addPremMessageId: message.message_id
+  };
+});
+
+// Handle add premium user reply
+bot.on(message('text'), async (ctx) => {
+  if (!ctx.session?.addPremMessageId || !ctx.message.reply_to_message) {
+    return;
+  }
+  
+  if (ctx.session.addPremMessageId === ctx.message.reply_to_message.message_id) {
+    const userId = parseInt(ctx.message.text.trim());
+    
+    if (isNaN(userId)) {
+      return await ctx.reply('❌ *User ID tidak valid.* Silakan masukkan angka.', {
+        parse_mode: 'Markdown'
+      });
+    }
+    
+    const userData = getUserData();
+    
+    if (userData.premium.includes(userId)) {
+      return await ctx.reply('⚠️ *User sudah menjadi premium.*', {
+        parse_mode: 'Markdown'
+      });
+    }
+    
+    userData.premium.push(userId);
+    saveUserData(userData);
+    
+    await ctx.reply(`✅ *User ID ${userId} berhasil ditambahkan sebagai user premium!*`, {
+      parse_mode: 'Markdown'
+    });
+    
+    // Clear session
+    delete ctx.session.addPremMessageId;
+    
+    // Notify user
+    try {
+      await bot.telegram.sendMessage(userId, 
+        '🌟 *Selamat!* Anda telah ditambahkan sebagai *User Premium* WhatsApp Management Bot.\n\n' +
+        'Anda sekarang dapat menggunakan fitur-fitur premium seperti:\n' +
+        '• Menghubungkan akun WhatsApp\n' +
+        '• Membuat grup WhatsApp secara massal\n' +
+        '• Mengelola grup yang telah dibuat\n\n' +
+        'Gunakan /start untuk memulai!', 
+        { parse_mode: 'Markdown' }
+      );
+    } catch (error) {
+      console.log(`Failed to notify user ${userId}: ${error.message}`);
+    }
+  }
+});
+
+// List premium users command
+bot.command('premlist', async (ctx) => {
+  if (!ctx.isAdmin) {
+    return await ctx.reply('⛔ Akses ditolak. Hanya admin yang dapat menggunakan fitur ini.');
+  }
+  
+  const userData = getUserData();
+  const premiumUsers = userData.premium;
+  
+  if (premiumUsers.length === 0) {
+    return await ctx.reply('❌ *Tidak ada user premium yang terdaftar.*', {
+      parse_mode: 'Markdown'
+    });
+  }
+  
+  let message = '⭐ *Daftar User Premium*\n\n';
+  premiumUsers.forEach((user, index) => {
+    message += `${index + 1}. \`${user}\`\n`;
+  });
+  
+  await ctx.replyWithMarkdown(message);
+});
 
 // Session middleware
 bot.use((ctx, next) => {
