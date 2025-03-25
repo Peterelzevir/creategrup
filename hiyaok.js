@@ -29,7 +29,7 @@ if (!fs.existsSync(DATA_DIR)) {
 const USER_FILE = path.join(DATA_DIR, 'users.json');
 if (!fs.existsSync(USER_FILE)) {
   fs.writeFileSync(USER_FILE, JSON.stringify({
-    admins: [/* Your Telegram User ID as a number */],
+    admins:[5988451717],
     premium: []
   }));
 }
