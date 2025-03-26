@@ -2,7 +2,7 @@
 // 📱 𝗪𝗵𝗮𝘁𝘀𝗔𝗽𝗽 𝗠𝗮𝗻𝗮𝗴𝗲𝗺𝗲𝗻𝘁 𝗧𝗲𝗹𝗲𝗴𝗿𝗮𝗺 𝗕𝗼𝘁 
 // ═════════════════════════════════════════════════════════════
 
-const { Telegraf } = require('telegraf');
+const { Telegraf, Scenes, session } = require('telegraf');
 const { message } = require('telegraf/filters');
 const fs = require('fs');
 const path = require('path');
@@ -29,7 +29,7 @@ if (!fs.existsSync(DATA_DIR)) {
 const USER_FILE = path.join(DATA_DIR, 'users.json');
 if (!fs.existsSync(USER_FILE)) {
   fs.writeFileSync(USER_FILE, JSON.stringify({
-    admins:[5988451717],
+    admins: [5988451717],
     premium: []
   }));
 }
@@ -45,6 +45,9 @@ const waConnections = {};
 
 // User to WhatsApp session mapping
 const userSessions = {};
+
+// Active message listeners
+const activeListeners = {};
 
 // Save sessions to file on startup and changes
 const SESSION_MAPPING_FILE = path.join(DATA_DIR, 'session_mapping.json');
@@ -123,6 +126,9 @@ const addUserSession = (userId, sessionId) => {
   if (!userSessions[userId].includes(sessionId)) {
     userSessions[userId].push(sessionId);
   }
+  
+  // Save immediately after adding
+  saveSessionMappings();
 };
 
 // Create a QR code image
@@ -137,136 +143,212 @@ const sanitizePhone = (phone) => {
   return phone.replace(/[^0-9]/g, '');
 };
 
+// Format phone number for WhatsApp
+const formatPhoneForWhatsApp = (phone) => {
+  phone = sanitizePhone(phone);
+  
+  // If starts with '62', keep it that way
+  if (phone.startsWith('62')) {
+    return phone;
+  }
+  
+  // If starts with '0', replace with '62'
+  if (phone.startsWith('0')) {
+    return '62' + phone.substring(1);
+  }
+  
+  // Otherwise, add '62' prefix
+  return '62' + phone;
+};
+
 // Connect to WhatsApp with QR Code
 const connectToWhatsApp = async (sessionId, ctx) => {
-  const sessionDir = path.join(SESSIONS_DIR, sessionId);
-  const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
-  
-  const sock = makeWASocket({
-    printQRInTerminal: true,
-    auth: state,
-    defaultQueryTimeoutMs: 60000
-  });
-  
-  // Store connection
-  waConnections[sessionId] = {
-    sock,
-    groups: []
-  };
-  
-  sock.ev.on('connection.update', async (update) => {
-    const { connection, lastDisconnect, qr } = update;
+  try {
+    const sessionDir = path.join(SESSIONS_DIR, sessionId);
+    const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
     
-    if (qr) {
-      // Generate and send QR code
-      const qrPath = await generateQRCode(qr);
-      await ctx.replyWithPhoto({ source: qrPath }, { 
-        caption: '🔄 *Silahkan scan QR Code untuk login WhatsApp*\n\n_QR akan hilang setelah berhasil terhubung_',
-        parse_mode: 'Markdown'
-      });
-      
-      // Delete QR file after sending
-      fs.unlinkSync(qrPath);
-    }
+    const sock = makeWASocket({
+      printQRInTerminal: true,
+      auth: state,
+      defaultQueryTimeoutMs: 60000
+    });
     
-    if (connection === 'close') {
-      const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+    // Store connection
+    waConnections[sessionId] = {
+      sock,
+      groups: []
+    };
+    
+    // Handle connection updates
+    sock.ev.on('connection.update', async (update) => {
+      const { connection, lastDisconnect, qr } = update;
       
-      if (shouldReconnect) {
-        await ctx.reply('⚠️ *Koneksi terputus, mencoba menyambung kembali...*', { parse_mode: 'Markdown' });
-        connectToWhatsApp(sessionId, ctx);
-      } else {
-        await ctx.reply('❌ *WhatsApp telah logout.*', { parse_mode: 'Markdown' });
-        // Remove session files
-        if (fs.existsSync(sessionDir)) {
-          fs.rmSync(sessionDir, { recursive: true, force: true });
+      if (qr) {
+        try {
+          // Generate and send QR code
+          const qrPath = await generateQRCode(qr);
+          await ctx.replyWithPhoto({ source: qrPath }, { 
+            caption: '🔄 *Silahkan scan QR Code untuk login WhatsApp*\n\n_QR akan hilang setelah berhasil terhubung_',
+            parse_mode: 'Markdown'
+          });
+          
+          // Delete QR file after sending
+          fs.unlinkSync(qrPath);
+        } catch (error) {
+          console.error("Error sending QR code:", error);
+          await ctx.reply('❌ *Error generating QR code. Please try again.*', { 
+            parse_mode: 'Markdown' 
+          });
         }
-        delete waConnections[sessionId];
       }
-    } else if (connection === 'open') {
-      await ctx.reply('✅ *WhatsApp berhasil terhubung!*', { parse_mode: 'Markdown' });
-    }
-  });
-  
-  sock.ev.on('creds.update', saveCreds);
+      
+      if (connection === 'close') {
+        const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+        
+        if (shouldReconnect) {
+          await ctx.reply('⚠️ *Koneksi terputus, mencoba menyambung kembali...*', { parse_mode: 'Markdown' });
+          connectToWhatsApp(sessionId, ctx);
+        } else {
+          await ctx.reply('❌ *WhatsApp telah logout.*', { parse_mode: 'Markdown' });
+          // Remove session files
+          if (fs.existsSync(sessionDir)) {
+            fs.rmSync(sessionDir, { recursive: true, force: true });
+          }
+          delete waConnections[sessionId];
+        }
+      } else if (connection === 'open') {
+        await ctx.reply('✅ *WhatsApp berhasil terhubung!*', { parse_mode: 'Markdown' });
+      }
+    });
+    
+    sock.ev.on('creds.update', saveCreds);
+    
+    return true;
+  } catch (error) {
+    console.error("Error connecting to WhatsApp:", error);
+    await ctx.reply(`❌ *Error connecting to WhatsApp:* ${error.message}`, { 
+      parse_mode: 'Markdown' 
+    });
+    return false;
+  }
 };
 
 // Connect to WhatsApp with Pairing Code
-const connectWithPairingCode = async (sessionId, ctx) => {
-  const sessionDir = path.join(SESSIONS_DIR, sessionId);
-  const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
-  
-  // Create socket with QR disabled
-  const sock = makeWASocket({
-    printQRInTerminal: false,
-    auth: state,
-    defaultQueryTimeoutMs: 60000
-  });
-  
-  // Store connection
-  waConnections[sessionId] = {
-    sock,
-    groups: []
-  };
-  
-  // Handle connection updates
-  sock.ev.on('connection.update', async (update) => {
-    const { connection, lastDisconnect } = update;
+const connectWithPairingCode = async (sessionId, phoneNumber, ctx) => {
+  try {
+    const sessionDir = path.join(SESSIONS_DIR, sessionId);
+    const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
     
-    if (connection === 'close') {
-      const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-      
-      if (shouldReconnect) {
-        await ctx.reply('⚠️ *Koneksi terputus, mencoba menyambung kembali...*', { parse_mode: 'Markdown' });
-        connectWithPairingCode(sessionId, ctx);
-      } else {
-        await ctx.reply('❌ *WhatsApp telah logout.*', { parse_mode: 'Markdown' });
-        // Remove session files
-        if (fs.existsSync(sessionDir)) {
-          fs.rmSync(sessionDir, { recursive: true, force: true });
-        }
-        delete waConnections[sessionId];
-      }
-    } else if (connection === 'open') {
-      await ctx.reply('✅ *WhatsApp berhasil terhubung!*', { parse_mode: 'Markdown' });
-    }
-  });
-  
-  // Save credentials when updated
-  sock.ev.on('creds.update', saveCreds);
-  
-  // Check if already registered (in case session already exists)
-  if (state?.creds?.registered === false) {
-    try {
-      // Request pairing code with the phone number
-      const formattedNumber = sessionId.split('_')[0];
-      const phoneNumber = formattedNumber.startsWith('62') 
-        ? formattedNumber 
-        : `62${formattedNumber.replace(/^0+/, '')}`;
-      
-      // Send info message
-      await ctx.reply('🔄 *Meminta Pairing Code dari server WhatsApp...*\nMohon tunggu sebentar.', {
-        parse_mode: 'Markdown'
-      });
-      
-      // Request pairing code
-      const pairingCode = await sock.requestPairingCode(phoneNumber);
-      
-      if (pairingCode) {
-        await ctx.reply(`🔑 *Kode Pairing Anda:*\n\n*${pairingCode}*\n\n_Masukkan kode ini di aplikasi WhatsApp Anda untuk menyelesaikan koneksi._`, {
-          parse_mode: 'Markdown'
-        });
-      }
-    } catch (error) {
-      console.error('Error requesting pairing code:', error);
-      await ctx.reply(`❌ *Gagal mendapatkan Pairing Code:* ${error.message}\n\nSilakan coba lagi atau gunakan metode QR Code.`, {
-        parse_mode: 'Markdown'
-      });
-    }
-  } else {
-    await ctx.reply('✅ *Sesi sudah ada. WhatsApp sudah terhubung!*', {
+    // Send info message
+    const statusMsg = await ctx.reply('🔄 *Meminta Pairing Code dari server WhatsApp...*\nMohon tunggu sebentar.', {
       parse_mode: 'Markdown'
     });
+    
+    // Create socket with QR disabled
+    const sock = makeWASocket({
+      printQRInTerminal: false,
+      auth: state,
+      defaultQueryTimeoutMs: 60000
+    });
+    
+    // Store connection
+    waConnections[sessionId] = {
+      sock,
+      groups: []
+    };
+    
+    // Handle connection updates
+    sock.ev.on('connection.update', async (update) => {
+      const { connection, lastDisconnect } = update;
+      
+      if (connection === 'close') {
+        const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+        
+        if (shouldReconnect) {
+          await ctx.reply('⚠️ *Koneksi terputus, mencoba menyambung kembali...*', { parse_mode: 'Markdown' });
+          connectWithPairingCode(sessionId, phoneNumber, ctx);
+        } else {
+          await ctx.reply('❌ *WhatsApp telah logout.*', { parse_mode: 'Markdown' });
+          // Remove session files
+          if (fs.existsSync(sessionDir)) {
+            fs.rmSync(sessionDir, { recursive: true, force: true });
+          }
+          delete waConnections[sessionId];
+        }
+      } else if (connection === 'open') {
+        await ctx.reply('✅ *WhatsApp berhasil terhubung!*', { parse_mode: 'Markdown' });
+        
+        // Try to delete status message
+        try {
+          await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id);
+        } catch (error) {
+          console.log('Could not delete status message:', error.message);
+        }
+      }
+    });
+    
+    // Save credentials when updated
+    sock.ev.on('creds.update', saveCreds);
+    
+    // Check if already registered (in case session already exists)
+    if (state?.creds?.registered === false) {
+      try {
+        // Format phone number correctly for WhatsApp
+        const formattedNumber = formatPhoneForWhatsApp(phoneNumber);
+        
+        // Request pairing code
+        const pairingCode = await sock.requestPairingCode(formattedNumber);
+        
+        if (pairingCode) {
+          // Try to delete status message
+          try {
+            await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id);
+          } catch (error) {
+            console.log('Could not delete status message:', error.message);
+          }
+          
+          await ctx.reply(`🔑 *Kode Pairing Anda:*\n\n*${pairingCode}*\n\n_Masukkan kode ini di aplikasi WhatsApp Anda untuk menyelesaikan koneksi._`, {
+            parse_mode: 'Markdown'
+          });
+          
+          return true;
+        }
+      } catch (error) {
+        console.error('Error requesting pairing code:', error);
+        
+        // Try to delete status message
+        try {
+          await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id);
+        } catch (err) {
+          console.log('Could not delete status message:', err.message);
+        }
+        
+        await ctx.reply(`❌ *Gagal mendapatkan Pairing Code:* ${error.message}\n\nSilakan coba lagi atau gunakan metode QR Code.`, {
+          parse_mode: 'Markdown'
+        });
+        
+        return false;
+      }
+    } else {
+      // Try to delete status message
+      try {
+        await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id);
+      } catch (error) {
+        console.log('Could not delete status message:', error.message);
+      }
+      
+      await ctx.reply('✅ *Sesi sudah ada. WhatsApp sudah terhubung!*', {
+        parse_mode: 'Markdown'
+      });
+      
+      return true;
+    }
+  } catch (error) {
+    console.error("Error connecting with pairing code:", error);
+    await ctx.reply(`❌ *Error connecting to WhatsApp:* ${error.message}`, { 
+      parse_mode: 'Markdown' 
+    });
+    return false;
   }
 };
 
@@ -312,6 +394,58 @@ const leaveWhatsAppGroup = async (sock, groupId) => {
   }
 };
 
+// Register a message listener that can be cleaned up
+const registerMessageListener = (userId, messageId, callback) => {
+  const listenerId = `${userId}_${messageId}`;
+  
+  if (activeListeners[listenerId]) {
+    bot.off(message('text'), activeListeners[listenerId]);
+  }
+  
+  const handler = (ctx) => {
+    if (ctx.message.reply_to_message?.message_id !== messageId || ctx.from.id !== userId) {
+      return;
+    }
+    
+    callback(ctx);
+    
+    // Auto-cleanup after successful handling
+    bot.off(message('text'), activeListeners[listenerId]);
+    delete activeListeners[listenerId];
+  };
+  
+  activeListeners[listenerId] = handler;
+  bot.on(message('text'), handler);
+  
+  // Set timeout to automatically clean up listener after 5 minutes
+  setTimeout(() => {
+    if (activeListeners[listenerId]) {
+      bot.off(message('text'), activeListeners[listenerId]);
+      delete activeListeners[listenerId];
+    }
+  }, 5 * 60 * 1000);
+  
+  return listenerId;
+};
+
+// Clean up a specific message listener
+const cleanupMessageListener = (listenerId) => {
+  if (activeListeners[listenerId]) {
+    bot.off(message('text'), activeListeners[listenerId]);
+    delete activeListeners[listenerId];
+  }
+};
+
+// Clean up all message listeners for a user
+const cleanupUserListeners = (userId) => {
+  Object.keys(activeListeners)
+    .filter(id => id.startsWith(`${userId}_`))
+    .forEach(id => {
+      bot.off(message('text'), activeListeners[id]);
+      delete activeListeners[id];
+    });
+};
+
 // Middleware to check user access
 bot.use(async (ctx, next) => {
   if (ctx.from) {
@@ -322,6 +456,9 @@ bot.use(async (ctx, next) => {
   }
   await next();
 });
+
+// Setup session middleware
+bot.use(session());
 
 // Start command
 bot.start(async (ctx) => {
@@ -385,6 +522,9 @@ bot.command('connect', async (ctx) => {
     return await ctx.reply('⛔ Akses ditolak. Hanya admin dan user premium yang dapat menggunakan bot ini.');
   }
   
+  // Clean up any existing listeners for this user
+  cleanupUserListeners(ctx.from.id);
+  
   // Pilihan metode koneksi: QR Code atau Pairing Code
   await ctx.reply('📱 *Pilih metode koneksi WhatsApp:*', {
     parse_mode: 'Markdown',
@@ -412,32 +552,21 @@ bot.action(/connect_method:(.+)/, async (ctx) => {
     parse_mode: 'Markdown'
   });
   
-  // Simpan metode koneksi dan user ID dalam session
-  ctx.session = {
-    ...ctx.session,
-    connectionMethod: method,
-    connectingUserId: userId
-  };
+  // Clean up any existing listeners
+  cleanupUserListeners(userId);
   
-  const phoneNumber = await ctx.reply('📱 *Masukkan nomor WhatsApp* (contoh: 628123456789):', {
+  // Store method in session
+  ctx.session.connectionMethod = method;
+  
+  const phoneMessage = await ctx.reply('📱 *Masukkan nomor WhatsApp* (contoh: 628123456789):', {
     parse_mode: 'Markdown',
     reply_markup: {
       force_reply: true
     }
   });
   
-  bot.on(message('text'), async (replyCtx) => {
-    if (replyCtx.message.reply_to_message?.message_id !== phoneNumber.message_id) {
-      return;
-    }
-    
-    // Pastikan yang mereply adalah user yang sama
-    if (replyCtx.from.id !== userId) {
-      return await replyCtx.reply('❌ *Anda tidak memiliki hak untuk melanjutkan setup ini.*', {
-        parse_mode: 'Markdown'
-      });
-    }
-    
+  // Register a message listener for the phone number reply
+  registerMessageListener(userId, phoneMessage.message_id, async (replyCtx) => {
     const phone = sanitizePhone(replyCtx.message.text);
     
     if (!phone || phone.length < 10) {
@@ -446,10 +575,10 @@ bot.action(/connect_method:(.+)/, async (ctx) => {
       });
     }
     
-    // Buat session ID yang unik per user
+    // Create a unique session ID for this user and phone
     const sessionId = `${phone}_${userId}`;
     
-    // Simpan session untuk user ini
+    // Add session to user's list
     addUserSession(userId, sessionId);
     
     const method = replyCtx.session?.connectionMethod || 'qr';
@@ -462,16 +591,9 @@ bot.action(/connect_method:(.+)/, async (ctx) => {
       // Start WhatsApp connection with QR
       await connectToWhatsApp(sessionId, replyCtx);
     } else {
-      await replyCtx.reply(`🔄 *Memulai proses koneksi dengan Pairing Code untuk nomor ${phone}...*\n\nSilakan tunggu Pairing Code muncul.`, {
-        parse_mode: 'Markdown'
-      });
-      
       // Start WhatsApp connection with Pairing Code
-      await connectWithPairingCode(sessionId, replyCtx);
+      await connectWithPairingCode(sessionId, phone, replyCtx);
     }
-    
-    // Remove listener
-    bot.off(message('text'));
   });
 });
 
@@ -567,6 +689,15 @@ bot.command('creategroup', async (ctx) => {
 // Callback handler for group creation
 bot.action(/create_group:(.+)/, async (ctx) => {
   const sessionId = ctx.match[1];
+  const userId = ctx.from.id;
+  
+  // Clean up any existing listeners
+  cleanupUserListeners(userId);
+  
+  await ctx.answerCbQuery();
+  
+  // Store in session
+  ctx.session.pendingGroupCreation = sessionId;
   
   // Hapus tombol setelah diklik
   await ctx.editMessageText(`📊 *Pilih akun WhatsApp untuk membuat grup:*\n\n✅ Akun *${sessionId}* dipilih`, {
@@ -575,21 +706,25 @@ bot.action(/create_group:(.+)/, async (ctx) => {
   
   // Check if session exists and is connected
   if (!waConnections[sessionId] || !waConnections[sessionId].sock) {
-    await ctx.reply(`🔄 *Menghubungkan ke akun ${sessionId}...*\nSilakan tunggu sebentar.`, {
+    const statusMsg = await ctx.reply(`🔄 *Menghubungkan ke akun ${sessionId}...*\nSilakan tunggu sebentar.`, {
       parse_mode: 'Markdown'
     });
-    await connectToWhatsApp(sessionId, ctx);
     
-    // Store session for later use
-    ctx.session = {
-      ...ctx.session,
-      pendingGroupCreation: sessionId
-    };
+    const success = await connectToWhatsApp(sessionId, ctx);
     
-    return;
+    if (!success) {
+      return await ctx.reply('❌ *Gagal menghubungkan ke WhatsApp.* Silakan coba lagi nanti.', {
+        parse_mode: 'Markdown'
+      });
+    }
+    
+    // Try to delete status message
+    try {
+      await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id);
+    } catch (error) {
+      console.log('Could not delete status message:', error.message);
+    }
   }
-  
-  await ctx.answerCbQuery();
   
   // Ask for group name
   const message = await ctx.reply('✏️ *Masukkan nama grup yang akan dibuat:*', {
@@ -599,134 +734,132 @@ bot.action(/create_group:(.+)/, async (ctx) => {
     }
   });
   
-  ctx.session = {
-    ...ctx.session,
-    pendingGroupCreation: sessionId,
-    groupNameMessageId: message.message_id
-  };
-});
-
-// Handle group name input
-bot.on(message('text'), async (ctx) => {
-  if (!ctx.session?.pendingGroupCreation || !ctx.message.reply_to_message) {
-    return;
-  }
-  
-  if (ctx.session.groupNameMessageId === ctx.message.reply_to_message.message_id) {
-    const groupName = ctx.message.text.trim();
+  // Register listener for group name
+  registerMessageListener(userId, message.message_id, async (replyCtx) => {
+    const groupName = replyCtx.message.text.trim();
     
     if (!groupName) {
-      return await ctx.reply('❌ *Nama grup tidak valid.* Silakan coba lagi.', {
+      return await replyCtx.reply('❌ *Nama grup tidak valid.* Silakan coba lagi.', {
         parse_mode: 'Markdown'
       });
     }
     
-    ctx.session.groupName = groupName;
+    replyCtx.session.groupName = groupName;
     
     // Ask for number of groups to create
-    const message = await ctx.reply('🔢 *Masukkan jumlah grup yang ingin dibuat:*', {
+    const countMessage = await replyCtx.reply('🔢 *Masukkan jumlah grup yang ingin dibuat:*', {
       parse_mode: 'Markdown',
       reply_markup: {
         force_reply: true
       }
     });
     
-    ctx.session.groupCountMessageId = message.message_id;
-    return;
-  }
-  
-  if (ctx.session.groupCountMessageId === ctx.message.reply_to_message.message_id) {
-    const count = parseInt(ctx.message.text.trim());
-    
-    if (isNaN(count) || count < 1 || count > 50) {
-      return await ctx.reply('❌ *Jumlah tidak valid.* Silakan masukkan angka antara 1-50.', {
-        parse_mode: 'Markdown'
-      });
-    }
-    
-    const sessionId = ctx.session.pendingGroupCreation;
-    const groupName = ctx.session.groupName;
-    
-    await ctx.reply(`🔄 *Proses pembuatan ${count} grup dengan nama "${groupName}" dimulai...*\nMohon tunggu sebentar.`, {
-      parse_mode: 'Markdown'
-    });
-    
-    const sock = waConnections[sessionId].sock;
-    const groups = [];
-    const groupData = getGroupData();
-    
-    if (!groupData[sessionId]) {
-      groupData[sessionId] = [];
-    }
-    
-    for (let i = 0; i < count; i++) {
-      try {
-        const fullGroupName = count > 1 ? `${groupName} ${i + 1}` : groupName;
-        
-        await ctx.reply(`🔄 *Membuat grup "${fullGroupName}" (${i + 1}/${count})...*`, {
-          parse_mode: 'Markdown'
-        });
-        
-        const group = await createWhatsAppGroup(sock, fullGroupName);
-        
-        // Get invite link
-        const inviteCode = await getGroupInviteLink(sock, group.id);
-        const inviteLink = inviteCode ? `https://chat.whatsapp.com/${inviteCode}` : null;
-        
-        group.invite = inviteLink;
-        groups.push(group);
-        
-        // Save group data
-        groupData[sessionId].push(group);
-        saveGroupData(groupData);
-        
-        // Store in connection
-        if (!waConnections[sessionId].groups) {
-          waConnections[sessionId].groups = [];
-        }
-        waConnections[sessionId].groups.push(group);
-      } catch (error) {
-        console.error(`Error creating group ${i + 1}:`, error);
-        await ctx.reply(`❌ *Error saat membuat grup ${i + 1}:* ${error.message}`, {
+    // Register listener for group count
+    registerMessageListener(userId, countMessage.message_id, async (countCtx) => {
+      const count = parseInt(countCtx.message.text.trim());
+      
+      if (isNaN(count) || count < 1 || count > 50) {
+        return await countCtx.reply('❌ *Jumlah tidak valid.* Silakan masukkan angka antara 1-50.', {
           parse_mode: 'Markdown'
         });
       }
-    }
-    
-    // Send results
-    if (groups.length > 0) {
-      let message = `✅ *${groups.length} grup berhasil dibuat!*\n\n`;
       
-      groups.forEach((group, index) => {
-        message += `${index + 1}. *${group.name}*\n`;
-        if (group.invite) {
-          message += `   🔗 ${group.invite}\n\n`;
-        } else {
-          message += `   ❌ Tidak dapat membuat link undangan\n\n`;
-        }
-      });
+      const sessionId = countCtx.session.pendingGroupCreation;
+      const groupName = countCtx.session.groupName;
       
-      await ctx.replyWithMarkdown(message, {
-        reply_markup: {
-          inline_keyboard: [
-            [
-              { text: "🚪 Keluar dari semua grup", callback_data: `exit_all:${sessionId}` }
-            ]
-          ]
-        }
-      });
-    } else {
-      await ctx.reply('❌ *Tidak ada grup yang berhasil dibuat.*', {
+      const statusMsg = await countCtx.reply(`🔄 *Proses pembuatan ${count} grup dengan nama "${groupName}" dimulai...*\nMohon tunggu sebentar.`, {
         parse_mode: 'Markdown'
       });
-    }
-    
-    // Clear session
-    delete ctx.session.pendingGroupCreation;
-    delete ctx.session.groupName;
-    delete ctx.session.groupNameMessageId;
-    delete ctx.session.groupCountMessageId;
-  }
+      
+      const sock = waConnections[sessionId].sock;
+      const groups = [];
+      const groupData = getGroupData();
+      
+      if (!groupData[sessionId]) {
+        groupData[sessionId] = [];
+      }
+      
+      for (let i = 0; i < count; i++) {
+        try {
+          const fullGroupName = count > 1 ? `${groupName} ${i + 1}` : groupName;
+          
+          const progressMsg = await countCtx.reply(`🔄 *Membuat grup "${fullGroupName}" (${i + 1}/${count})...*`, {
+            parse_mode: 'Markdown'
+          });
+          
+          const group = await createWhatsAppGroup(sock, fullGroupName);
+          
+          // Get invite link
+          const inviteCode = await getGroupInviteLink(sock, group.id);
+          const inviteLink = inviteCode ? `https://chat.whatsapp.com/${inviteCode}` : null;
+          
+          group.invite = inviteLink;
+          groups.push(group);
+          
+          // Save group data
+          groupData[sessionId].push(group);
+          saveGroupData(groupData);
+          
+          // Store in connection
+          if (!waConnections[sessionId].groups) {
+            waConnections[sessionId].groups = [];
+          }
+          waConnections[sessionId].groups.push(group);
+          
+          // Try to delete progress message
+          try {
+            await countCtx.telegram.deleteMessage(countCtx.chat.id, progressMsg.message_id);
+          } catch (error) {
+            console.log('Could not delete progress message:', error.message);
+          }
+        } catch (error) {
+          console.error(`Error creating group ${i + 1}:`, error);
+          await countCtx.reply(`❌ *Error saat membuat grup ${i + 1}:* ${error.message}`, {
+            parse_mode: 'Markdown'
+          });
+        }
+      }
+      
+      // Try to delete status message
+      try {
+        await countCtx.telegram.deleteMessage(countCtx.chat.id, statusMsg.message_id);
+      } catch (error) {
+        console.log('Could not delete status message:', error.message);
+      }
+      
+      // Send results
+      if (groups.length > 0) {
+        let message = `✅ *${groups.length} grup berhasil dibuat!*\n\n`;
+        
+        groups.forEach((group, index) => {
+          message += `${index + 1}. *${group.name}*\n`;
+          if (group.invite) {
+            message += `   🔗 ${group.invite}\n\n`;
+          } else {
+            message += `   ❌ Tidak dapat membuat link undangan\n\n`;
+          }
+        });
+        
+        await countCtx.replyWithMarkdown(message, {
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: "🚪 Keluar dari semua grup", callback_data: `exit_all:${sessionId}` }
+              ]
+            ]
+          }
+        });
+      } else {
+        await countCtx.reply('❌ *Tidak ada grup yang berhasil dibuat.*', {
+          parse_mode: 'Markdown'
+        });
+      }
+      
+      // Clear session
+      delete countCtx.session.pendingGroupCreation;
+      delete countCtx.session.groupName;
+    });
+  });
 });
 
 // Exit all groups command
@@ -782,7 +915,7 @@ bot.action(/exit_all:(.+)/, async (ctx) => {
   await ctx.answerCbQuery();
   
   // Hapus tombol setelah diklik jika dari perintah /keluarall
-  if (ctx.callbackQuery.message.text.includes('Pilih akun WhatsApp untuk keluar dari semua grup')) {
+  if (ctx.callbackQuery.message.text && ctx.callbackQuery.message.text.includes('Pilih akun WhatsApp untuk keluar dari semua grup')) {
     await ctx.editMessageText(`📊 *Pilih akun WhatsApp untuk keluar dari semua grup:*\n\n✅ Akun *${sessionId}* dipilih`, {
       parse_mode: 'Markdown'
     });
@@ -790,11 +923,24 @@ bot.action(/exit_all:(.+)/, async (ctx) => {
   
   // Check if session exists and is connected
   if (!waConnections[sessionId] || !waConnections[sessionId].sock) {
-    await ctx.reply(`🔄 *Menghubungkan ke akun ${sessionId}...*\nSilakan tunggu sebentar.`, {
+    const statusMsg = await ctx.reply(`🔄 *Menghubungkan ke akun ${sessionId}...*\nSilakan tunggu sebentar.`, {
       parse_mode: 'Markdown'
     });
-    await connectToWhatsApp(sessionId, ctx);
-    return;
+    
+    const success = await connectToWhatsApp(sessionId, ctx);
+    
+    if (!success) {
+      return await ctx.reply('❌ *Gagal menghubungkan ke WhatsApp.* Silakan coba lagi nanti.', {
+        parse_mode: 'Markdown'
+      });
+    }
+    
+    // Try to delete status message
+    try {
+      await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id);
+    } catch (error) {
+      console.log('Could not delete status message:', error.message);
+    }
   }
   
   // Confirm exit
@@ -838,7 +984,7 @@ bot.action(/confirm_exit_all:(.+)/, async (ctx) => {
     });
   }
   
-  await ctx.reply(`🔄 *Proses keluar dari ${groups.length} grup dimulai...*\nMohon tunggu sebentar.`, {
+  const statusMsg = await ctx.reply(`🔄 *Proses keluar dari ${groups.length} grup dimulai...*\nMohon tunggu sebentar.`, {
     parse_mode: 'Markdown'
   });
   
@@ -848,12 +994,23 @@ bot.action(/confirm_exit_all:(.+)/, async (ctx) => {
   
   for (const group of groups) {
     try {
+      const progressMsg = await ctx.reply(`🔄 *Keluar dari grup "${group.name}"...*`, {
+        parse_mode: 'Markdown'
+      });
+      
       const success = await leaveWhatsAppGroup(sock, group.id);
       
       if (success) {
         successCount++;
       } else {
         failCount++;
+      }
+      
+      // Try to delete progress message
+      try {
+        await ctx.telegram.deleteMessage(ctx.chat.id, progressMsg.message_id);
+      } catch (error) {
+        console.log('Could not delete progress message:', error.message);
       }
     } catch (error) {
       console.error(`Error leaving group ${group.name}:`, error);
@@ -869,6 +1026,13 @@ bot.action(/confirm_exit_all:(.+)/, async (ctx) => {
     waConnections[sessionId].groups = [];
   }
   
+  // Try to delete status message
+  try {
+    await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id);
+  } catch (error) {
+    console.log('Could not delete status message:', error.message);
+  }
+  
   await ctx.reply(`✅ *Proses selesai!*\n\n✅ Berhasil keluar dari: ${successCount} grup\n❌ Gagal keluar dari: ${failCount} grup`, {
     parse_mode: 'Markdown'
   });
@@ -880,6 +1044,9 @@ bot.command('addadmin', async (ctx) => {
     return await ctx.reply('⛔ Akses ditolak. Hanya admin yang dapat menggunakan fitur ini.');
   }
   
+  // Clean up any existing listeners
+  cleanupUserListeners(ctx.from.id);
+  
   const message = await ctx.reply('👤 *Kirim User ID Telegram yang ingin dijadikan admin:*\n_(Forward pesan dari user atau masukkan ID secara manual)_', {
     parse_mode: 'Markdown',
     reply_markup: {
@@ -887,23 +1054,12 @@ bot.command('addadmin', async (ctx) => {
     }
   });
   
-  ctx.session = {
-    ...ctx.session,
-    addAdminMessageId: message.message_id
-  };
-});
-
-// Handle add admin reply
-bot.on(message('text'), async (ctx) => {
-  if (!ctx.session?.addAdminMessageId || !ctx.message.reply_to_message) {
-    return;
-  }
-  
-  if (ctx.session.addAdminMessageId === ctx.message.reply_to_message.message_id) {
-    const userId = parseInt(ctx.message.text.trim());
+  // Register listener for admin ID
+  registerMessageListener(ctx.from.id, message.message_id, async (replyCtx) => {
+    const userId = parseInt(replyCtx.message.text.trim());
     
     if (isNaN(userId)) {
-      return await ctx.reply('❌ *User ID tidak valid.* Silakan masukkan angka.', {
+      return await replyCtx.reply('❌ *User ID tidak valid.* Silakan masukkan angka.', {
         parse_mode: 'Markdown'
       });
     }
@@ -911,7 +1067,7 @@ bot.on(message('text'), async (ctx) => {
     const userData = getUserData();
     
     if (userData.admins.includes(userId)) {
-      return await ctx.reply('⚠️ *User sudah menjadi admin.*', {
+      return await replyCtx.reply('⚠️ *User sudah menjadi admin.*', {
         parse_mode: 'Markdown'
       });
     }
@@ -919,13 +1075,10 @@ bot.on(message('text'), async (ctx) => {
     userData.admins.push(userId);
     saveUserData(userData);
     
-    await ctx.reply(`✅ *User ID ${userId} berhasil ditambahkan sebagai admin!*`, {
+    await replyCtx.reply(`✅ *User ID ${userId} berhasil ditambahkan sebagai admin!*`, {
       parse_mode: 'Markdown'
     });
-    
-    // Clear session
-    delete ctx.session.addAdminMessageId;
-  }
+  });
 });
 
 // List admins command
@@ -957,6 +1110,9 @@ bot.command('addprem', async (ctx) => {
     return await ctx.reply('⛔ Akses ditolak. Hanya admin yang dapat menggunakan fitur ini.');
   }
   
+  // Clean up any existing listeners
+  cleanupUserListeners(ctx.from.id);
+  
   const message = await ctx.reply('👤 *Kirim User ID Telegram yang ingin dijadikan user premium:*\n_(Forward pesan dari user atau masukkan ID secara manual)_', {
     parse_mode: 'Markdown',
     reply_markup: {
@@ -964,23 +1120,12 @@ bot.command('addprem', async (ctx) => {
     }
   });
   
-  ctx.session = {
-    ...ctx.session,
-    addPremMessageId: message.message_id
-  };
-});
-
-// Handle add premium user reply
-bot.on(message('text'), async (ctx) => {
-  if (!ctx.session?.addPremMessageId || !ctx.message.reply_to_message) {
-    return;
-  }
-  
-  if (ctx.session.addPremMessageId === ctx.message.reply_to_message.message_id) {
-    const userId = parseInt(ctx.message.text.trim());
+  // Register listener for premium ID
+  registerMessageListener(ctx.from.id, message.message_id, async (replyCtx) => {
+    const userId = parseInt(replyCtx.message.text.trim());
     
     if (isNaN(userId)) {
-      return await ctx.reply('❌ *User ID tidak valid.* Silakan masukkan angka.', {
+      return await replyCtx.reply('❌ *User ID tidak valid.* Silakan masukkan angka.', {
         parse_mode: 'Markdown'
       });
     }
@@ -988,7 +1133,7 @@ bot.on(message('text'), async (ctx) => {
     const userData = getUserData();
     
     if (userData.premium.includes(userId)) {
-      return await ctx.reply('⚠️ *User sudah menjadi premium.*', {
+      return await replyCtx.reply('⚠️ *User sudah menjadi premium.*', {
         parse_mode: 'Markdown'
       });
     }
@@ -996,12 +1141,9 @@ bot.on(message('text'), async (ctx) => {
     userData.premium.push(userId);
     saveUserData(userData);
     
-    await ctx.reply(`✅ *User ID ${userId} berhasil ditambahkan sebagai user premium!*`, {
+    await replyCtx.reply(`✅ *User ID ${userId} berhasil ditambahkan sebagai user premium!*`, {
       parse_mode: 'Markdown'
     });
-    
-    // Clear session
-    delete ctx.session.addPremMessageId;
     
     // Notify user
     try {
@@ -1017,7 +1159,7 @@ bot.on(message('text'), async (ctx) => {
     } catch (error) {
       console.log(`Failed to notify user ${userId}: ${error.message}`);
     }
-  }
+  });
 });
 
 // List premium users command
@@ -1041,12 +1183,6 @@ bot.command('premlist', async (ctx) => {
   });
   
   await ctx.replyWithMarkdown(message);
-});
-
-// Session middleware
-bot.use((ctx, next) => {
-  if (!ctx.session) ctx.session = {};
-  return next();
 });
 
 // Launch bot
