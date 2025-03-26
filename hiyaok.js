@@ -3,6 +3,7 @@
 // ═════════════════════════════════════════════════════════════
 
 const { Telegraf, Scenes, session } = require('telegraf');
+const LocalSession = require('telegraf-session-local');
 const { message } = require('telegraf/filters');
 const fs = require('fs');
 const path = require('path');
@@ -29,7 +30,7 @@ if (!fs.existsSync(DATA_DIR)) {
 const USER_FILE = path.join(DATA_DIR, 'users.json');
 if (!fs.existsSync(USER_FILE)) {
   fs.writeFileSync(USER_FILE, JSON.stringify({
-    admins: [5988451717],
+    admins: [5988451717], // Replace with your Telegram ID or add yours to this array
     premium: []
   }));
 }
@@ -446,6 +447,19 @@ const cleanupUserListeners = (userId) => {
     });
 };
 
+// Setup local session storage that persists to file
+const localSession = new LocalSession({
+  database: path.join(DATA_DIR, 'session_db.json'),
+  storage: LocalSession.storageMemory,
+  format: {
+    serialize: (obj) => JSON.stringify(obj, null, 2),
+    deserialize: (str) => JSON.parse(str)
+  }
+});
+
+// Session middleware must be set up first, before other middleware
+bot.use(localSession.middleware());
+
 // Middleware to check user access
 bot.use(async (ctx, next) => {
   if (ctx.from) {
@@ -454,11 +468,14 @@ bot.use(async (ctx, next) => {
     ctx.isPremium = isPremium(userId);
     ctx.hasAccess = ctx.isAdmin || ctx.isPremium;
   }
+  
+  // Ensure session exists
+  if (!ctx.session) ctx.session = {};
+  
   await next();
 });
 
-// Setup session middleware
-bot.use(session());
+
 
 // Start command
 bot.start(async (ctx) => {
@@ -555,7 +572,8 @@ bot.action(/connect_method:(.+)/, async (ctx) => {
   // Clean up any existing listeners
   cleanupUserListeners(userId);
   
-  // Store method in session
+  // Store method in session (with fallback if session is undefined)
+  if (!ctx.session) ctx.session = {};
   ctx.session.connectionMethod = method;
   
   const phoneMessage = await ctx.reply('📱 *Masukkan nomor WhatsApp* (contoh: 628123456789):', {
@@ -581,7 +599,9 @@ bot.action(/connect_method:(.+)/, async (ctx) => {
     // Add session to user's list
     addUserSession(userId, sessionId);
     
-    const method = replyCtx.session?.connectionMethod || 'qr';
+    // Ensure session exists and grab connection method
+    if (!replyCtx.session) replyCtx.session = {};
+    const method = replyCtx.session.connectionMethod || 'qr';
     
     if (method === 'qr') {
       await replyCtx.reply(`🔄 *Memulai proses koneksi QR untuk nomor ${phone}...*\n\nSilakan tunggu QR Code muncul.`, {
