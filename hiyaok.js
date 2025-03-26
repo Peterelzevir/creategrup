@@ -2,20 +2,24 @@
 // 📱 𝗪𝗵𝗮𝘁𝘀𝗔𝗽𝗽 𝗠𝗮𝗻𝗮𝗴𝗲𝗺𝗲𝗻𝘁 𝗧𝗲𝗹𝗲𝗴𝗿𝗮𝗺 𝗕𝗼𝘁 
 // ═════════════════════════════════════════════════════════════
 
-// Delete all require statements at the beginning and replace with this
+// Add required modules and polyfills
 const { Telegraf, Scenes } = require('telegraf');
 const { message } = require('telegraf/filters');
 const LocalSession = require('telegraf-session-local');
 const fs = require('fs');
 const path = require('path');
 const qrcode = require('qrcode');
+const crypto = require('crypto');
+
+// Ensure crypto is available globally (fixes the baileys issue)
+global.crypto = crypto;
+
 const { 
   default: makeWASocket, 
   DisconnectReason, 
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
-  makeCacheableSignalKeyStore,
-  isJidBroadcast
+  makeCacheableSignalKeyStore
 } = require('@whiskeysockets/baileys');
 
 // Bot configuration
@@ -181,21 +185,11 @@ const connectToWhatsApp = async (sessionId, ctx) => {
       parse_mode: 'Markdown'
     });
     
-    const { version } = await fetchLatestBaileysVersion();
-    console.log(`Using WA v${version.join('.')}`);
-    
+    // Use a simpler configuration that's more compatible
     const sock = makeWASocket({
-      version,
+      auth: state,
       printQRInTerminal: true,
-      auth: {
-        creds: state.creds,
-        keys: makeCacheableSignalKeyStore(state.keys, console.log)
-      },
       defaultQueryTimeoutMs: 60000,
-      emitOwnEvents: true,
-      getMessage: async () => {
-        return { conversation: 'hello' };
-      }
     });
     
     // Store connection
