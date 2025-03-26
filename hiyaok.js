@@ -2,13 +2,21 @@
 // 📱 𝗪𝗵𝗮𝘁𝘀𝗔𝗽𝗽 𝗠𝗮𝗻𝗮𝗴𝗲𝗺𝗲𝗻𝘁 𝗧𝗲𝗹𝗲𝗴𝗿𝗮𝗺 𝗕𝗼𝘁 
 // ═════════════════════════════════════════════════════════════
 
-const { Telegraf, Scenes, session } = require('telegraf');
-const LocalSession = require('telegraf-session-local');
+// Delete all require statements at the beginning and replace with this
+const { Telegraf, Scenes } = require('telegraf');
 const { message } = require('telegraf/filters');
+const LocalSession = require('telegraf-session-local');
 const fs = require('fs');
 const path = require('path');
 const qrcode = require('qrcode');
-const { default: makeWASocket, DisconnectReason, useMultiFileAuthState } = require('@whiskeysockets/baileys');
+const { 
+  default: makeWASocket, 
+  DisconnectReason, 
+  useMultiFileAuthState,
+  fetchLatestBaileysVersion,
+  makeCacheableSignalKeyStore,
+  isJidBroadcast
+} = require('@whiskeysockets/baileys');
 
 // Bot configuration
 const BOT_TOKEN = '8070819656:AAFL4uYsyIG2i1ZlqvskDe6663IlT-t6w8Y';
@@ -168,10 +176,26 @@ const connectToWhatsApp = async (sessionId, ctx) => {
     const sessionDir = path.join(SESSIONS_DIR, sessionId);
     const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
     
+    // Send initial status message
+    const statusMsg = await ctx.reply('🔄 *Memulai koneksi WhatsApp...*\nMohon tunggu sebentar.', {
+      parse_mode: 'Markdown'
+    });
+    
+    const { version } = await fetchLatestBaileysVersion();
+    console.log(`Using WA v${version.join('.')}`);
+    
     const sock = makeWASocket({
+      version,
       printQRInTerminal: true,
-      auth: state,
-      defaultQueryTimeoutMs: 60000
+      auth: {
+        creds: state.creds,
+        keys: makeCacheableSignalKeyStore(state.keys, console.log)
+      },
+      defaultQueryTimeoutMs: 60000,
+      emitOwnEvents: true,
+      getMessage: async () => {
+        return { conversation: 'hello' };
+      }
     });
     
     // Store connection
@@ -189,7 +213,7 @@ const connectToWhatsApp = async (sessionId, ctx) => {
           // Generate and send QR code
           const qrPath = await generateQRCode(qr);
           await ctx.replyWithPhoto({ source: qrPath }, { 
-            caption: '🔄 *Silahkan scan QR Code untuk login WhatsApp*\n\n_QR akan hilang setelah berhasil terhubung_',
+            caption: '🔄 *Silahkan scan QR Code untuk login WhatsApp*\n\n_QR akan berubah atau hilang setelah berhasil terhubung_',
             parse_mode: 'Markdown'
           });
           
@@ -197,7 +221,7 @@ const connectToWhatsApp = async (sessionId, ctx) => {
           fs.unlinkSync(qrPath);
         } catch (error) {
           console.error("Error sending QR code:", error);
-          await ctx.reply('❌ *Error generating QR code. Please try again.*', { 
+          await ctx.reply(`❌ *Error generating QR code:* ${error.message}`, { 
             parse_mode: 'Markdown' 
           });
         }
@@ -219,6 +243,13 @@ const connectToWhatsApp = async (sessionId, ctx) => {
         }
       } else if (connection === 'open') {
         await ctx.reply('✅ *WhatsApp berhasil terhubung!*', { parse_mode: 'Markdown' });
+        
+        // Try to delete status message
+        try {
+          await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id);
+        } catch (error) {
+          console.log('Could not delete status message:', error.message);
+        }
       }
     });
     
@@ -245,11 +276,31 @@ const connectWithPairingCode = async (sessionId, phoneNumber, ctx) => {
       parse_mode: 'Markdown'
     });
     
-    // Create socket with QR disabled
+    // Format phone number for WhatsApp
+    // Remove any '+' and ensure it has country code
+    phoneNumber = sanitizePhone(phoneNumber);
+    if (phoneNumber.startsWith('0')) {
+      phoneNumber = '62' + phoneNumber.substring(1);
+    } else if (!phoneNumber.startsWith('62')) {
+      phoneNumber = '62' + phoneNumber;
+    }
+    
+    // Create socket with QR disabled and mobile registration
+    const { version } = await fetchLatestBaileysVersion();
+    console.log(`Using WA v${version.join('.')}`);
+    
     const sock = makeWASocket({
+      version,
       printQRInTerminal: false,
-      auth: state,
-      defaultQueryTimeoutMs: 60000
+      auth: {
+        creds: state.creds,
+        keys: makeCacheableSignalKeyStore(state.keys, console.log)
+      },
+      defaultQueryTimeoutMs: 60000,
+      emitOwnEvents: true,
+      getMessage: async () => {
+        return { conversation: 'hello' };
+      }
     });
     
     // Store connection
@@ -291,16 +342,13 @@ const connectWithPairingCode = async (sessionId, phoneNumber, ctx) => {
     // Save credentials when updated
     sock.ev.on('creds.update', saveCreds);
     
-    // Check if already registered (in case session already exists)
-    if (state?.creds?.registered === false) {
+    // Wait a bit for the socket to initialize
+    setTimeout(async () => {
       try {
-        // Format phone number correctly for WhatsApp
-        const formattedNumber = formatPhoneForWhatsApp(phoneNumber);
-        
         // Request pairing code
-        const pairingCode = await sock.requestPairingCode(formattedNumber);
+        const code = await sock.requestPairingCode(phoneNumber);
         
-        if (pairingCode) {
+        if (code) {
           // Try to delete status message
           try {
             await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id);
@@ -308,11 +356,16 @@ const connectWithPairingCode = async (sessionId, phoneNumber, ctx) => {
             console.log('Could not delete status message:', error.message);
           }
           
-          await ctx.reply(`🔑 *Kode Pairing Anda:*\n\n*${pairingCode}*\n\n_Masukkan kode ini di aplikasi WhatsApp Anda untuk menyelesaikan koneksi._`, {
+          // Format code with spaces for better readability
+          const formattedCode = code.match(/.{1,3}/g).join(' ');
+          
+          await ctx.reply(`🔑 *Kode Pairing Anda:*\n\n*${formattedCode}*\n\n_Masukkan kode ini di aplikasi WhatsApp Anda untuk menyelesaikan koneksi._`, {
             parse_mode: 'Markdown'
           });
           
           return true;
+        } else {
+          throw new Error('Tidak menerima kode pairing dari server');
         }
       } catch (error) {
         console.error('Error requesting pairing code:', error);
@@ -330,20 +383,9 @@ const connectWithPairingCode = async (sessionId, phoneNumber, ctx) => {
         
         return false;
       }
-    } else {
-      // Try to delete status message
-      try {
-        await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id);
-      } catch (error) {
-        console.log('Could not delete status message:', error.message);
-      }
-      
-      await ctx.reply('✅ *Sesi sudah ada. WhatsApp sudah terhubung!*', {
-        parse_mode: 'Markdown'
-      });
-      
-      return true;
-    }
+    }, 3000);
+    
+    return true;
   } catch (error) {
     console.error("Error connecting with pairing code:", error);
     await ctx.reply(`❌ *Error connecting to WhatsApp:* ${error.message}`, { 
