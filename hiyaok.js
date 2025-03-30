@@ -1,10 +1,9 @@
-// index.js
+// hiyaok.js
 const { default: makeWASocket, useMultiFileAuthState, makeInMemoryStore, DisconnectReason } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const { Boom } = require('@hapi/boom');
 const fs = require('fs');
 const readline = require('readline');
-const path = require('path');
 const crypto = require('crypto');
 
 // Ensure crypto is available globally (fixes the baileys issue)
@@ -34,16 +33,8 @@ async function connectToWhatsApp() {
   // Authenticate using saved credentials or create new ones
   const { state, saveCreds } = await useMultiFileAuthState('auth_info');
   
-  // Set up logger
-  const logger = pino({ 
-    level: 'silent',
-    transport: {
-      target: 'pino-pretty',
-      options: {
-        colorize: true
-      }
-    }
-  });
+  // Simple logger without pino-pretty
+  const logger = pino({ level: 'silent' });
 
   // Create WhatsApp socket connection
   const sock = makeWASocket({
@@ -350,5 +341,11 @@ console.log('║       WhatsApp Group Creator Bot       ║');
 console.log('╚════════════════════════════════════════╝\x1b[0m');
 console.log('\n\x1b[36m[Info]\x1b[0m Starting bot...');
 console.log('\x1b[36m[Info]\x1b[0m Bot will use pairing code method to connect');
+
+// Make sure auth_info directory exists
+if (!fs.existsSync('./auth_info')) {
+  fs.mkdirSync('./auth_info');
+}
+
 fs.appendFileSync(logFileName, `[${new Date().toLocaleString()}] Bot started\n`);
 connectToWhatsApp();
