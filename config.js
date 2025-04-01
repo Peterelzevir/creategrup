@@ -3,7 +3,7 @@ module.exports = {
   telegramToken: '7332933814:AAG9VvU6jri2PPMMrsyPwqi2L2Y670zruCg',
   
   // Token GitHub (dengan izin untuk membuat repo)
-  githubToken: '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',
+  githubToken: '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',
   
   // Username GitHub
   githubUsername: 'cokycokynanas',
