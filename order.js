@@ -1,3 +1,4 @@
+//
 // Bot Telegram Pembuat Grup WhatsApp
 // Menggunakan @whiskeysockets/baileys untuk WhatsApp dan node-telegram-bot-api untuk Telegram
 
@@ -10,6 +11,7 @@ const { Boom } = require('@hapi/boom');
 const pino = require('pino');
 const logger = pino({ level: 'silent' });
 const crypto = require('crypto');
+const axios = require('axios'); // Tambahkan axios untuk download foto
 //
 global.crypto = crypto;
 
@@ -17,10 +19,14 @@ global.crypto = crypto;
 const token = '7641668767:AAEDQW8wDXBIcY7SeOcSjSrSsQSb8yrI3xc';
 const bot = new TelegramBot(token, { polling: true });
 
-// Folder untuk menyimpan sesi WhatsApp
+// Folder untuk menyimpan sesi WhatsApp dan foto profil
 const sessionDir = path.join(__dirname, 'wa-sessions');
+const profilePicsDir = path.join(__dirname, 'profile-pics');
 if (!fs.existsSync(sessionDir)) {
   fs.mkdirSync(sessionDir);
+}
+if (!fs.existsSync(profilePicsDir)) {
+  fs.mkdirSync(profilePicsDir);
 }
 
 // Simpan sesi aktif pengguna
@@ -66,7 +72,8 @@ async function connectToWhatsApp(userId, retryCount = 0) {
       saveCreds,
       qrMessageId: userData?.qrMessageId || null,
       retryCount: 0,
-      qrTimeout: null
+      qrTimeout: null,
+      profilePic: userData?.profilePic || null // Simpan path foto profil jika ada
     });
     
     // Handler untuk update koneksi
@@ -244,7 +251,8 @@ async function connectToWhatsApp(userId, retryCount = 0) {
           `📱 Nomor: +${phoneNumber}\n` +
           `👤 Nama: ${sock.user.name}\n\n` +
           `Sekarang kamu bisa buat grup dengan perintah:\n` +
-          `/buat [nama grup] [jumlah]`,
+          `/buat [nama grup] [jumlah]\n\n` +
+          `Atau kirim foto dengan caption: /buat [nama grup] [jumlah] untuk menggunakan foto sebagai profil grup`,
           { parse_mode: 'Markdown' }
         );
       }
@@ -281,8 +289,61 @@ async function connectToWhatsApp(userId, retryCount = 0) {
   }
 }
 
+// Fungsi untuk mendownload foto dari Telegram
+async function downloadTelegramPhoto(fileId, userId) {
+  try {
+    // Dapatkan path file
+    const fileInfo = await bot.getFile(fileId);
+    const fileUrl = `https://api.telegram.org/file/bot${token}/${fileInfo.file_path}`;
+    
+    // Buat folder khusus untuk user jika belum ada
+    const userProfileDir = path.join(profilePicsDir, userId.toString());
+    if (!fs.existsSync(userProfileDir)) {
+      fs.mkdirSync(userProfileDir, { recursive: true });
+    }
+    
+    // Nama file dengan timestamp untuk menghindari cache
+    const timestamp = Date.now();
+    const filePath = path.join(userProfileDir, `profile_${timestamp}.jpg`);
+    
+    // Download file
+    const response = await axios({
+      method: 'GET',
+      url: fileUrl,
+      responseType: 'stream'
+    });
+    
+    // Simpan ke file
+    const writer = fs.createWriteStream(filePath);
+    response.data.pipe(writer);
+    
+    return new Promise((resolve, reject) => {
+      writer.on('finish', () => resolve(filePath));
+      writer.on('error', reject);
+    });
+  } catch (error) {
+    console.error('Error download foto:', error);
+    throw error;
+  }
+}
+
+// Fungsi untuk set foto profil grup WhatsApp
+async function setGroupProfilePicture(sock, groupId, imagePath) {
+  try {
+    // Baca file gambar
+    const img = fs.readFileSync(imagePath);
+    
+    // Set foto profil grup
+    await sock.updateProfilePicture(groupId, img);
+    return true;
+  } catch (error) {
+    console.error(`Error set profil grup ${groupId}:`, error);
+    return false;
+  }
+}
+
 // Fungsi untuk membuat grup WhatsApp
-async function createWhatsAppGroups(userId, groupName, count) {
+async function createWhatsAppGroups(userId, groupName, count, profilePicPath = null) {
   const userData = activeUsers.get(userId);
   if (!userData || !userData.sock) {
     return {
@@ -324,6 +385,7 @@ async function createWhatsAppGroups(userId, groupName, count) {
             `📊 Progress: ${i}/${count}\n` +
             `🔄 Lagi bikin: *${fullGroupName}*\n` +
             (retryCount > 0 ? `🔁 Percobaan ke-${retryCount + 1}...\n` : '') +
+            (profilePicPath ? `🖼️ Dengan foto profil\n` : '') +
             `\n_Jangan khawatir, ini butuh waktu dikit..._`,
             {
               chat_id: userId,
@@ -335,13 +397,39 @@ async function createWhatsAppGroups(userId, groupName, count) {
           // Buat grup baru
           const group = await sock.groupCreate(fullGroupName, []);
           
+          // Set foto profil grup jika ada
+          if (profilePicPath) {
+            await bot.editMessageText(
+              `⚙️ *Memproses Permintaan...*\n\n` +
+              `📊 Progress: ${i}/${count}\n` +
+              `🔄 Grup *${fullGroupName}* dibuat\n` +
+              `🖼️ Mengatur foto profil grup...\n` +
+              `\n_Jangan khawatir, ini butuh waktu dikit..._`,
+              {
+                chat_id: userId,
+                message_id: processingMsg.message_id,
+                parse_mode: 'Markdown'
+              }
+            );
+            
+            // Tunggu sebentar sebelum set foto profil
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            
+            // Set foto profil
+            const setPicResult = await setGroupProfilePicture(sock, group.id, profilePicPath);
+            if (!setPicResult) {
+              console.log(`Gagal set profil untuk grup ${fullGroupName}`);
+            }
+          }
+          
           // Generate link invite
           const inviteCode = await sock.groupInviteCode(group.id);
           const inviteLink = `https://chat.whatsapp.com/${inviteCode}`;
           
           createdGroups.push({
             name: fullGroupName,
-            link: inviteLink
+            link: inviteLink,
+            id: group.id
           });
           
           createdGroup = group;
@@ -382,11 +470,16 @@ async function createWhatsAppGroups(userId, groupName, count) {
                      `Kemungkinan ada masalah dengan koneksi WhatsApp kamu.\n` +
                      `Coba connect ulang dengan /logout lalu /connect.`;
     } else {
+      if (profilePicPath) {
+        resultMessage += `🖼️ *Semua grup menggunakan foto profil yang kamu kirim*\n\n`;
+      }
+      
       createdGroups.forEach((group, index) => {
         resultMessage += `*${index + 1}. ${group.name}*\n${group.link}\n\n`;
       });
       
-      resultMessage += `_Untuk membuat grup lagi, gunakan /buat [nama] [jumlah]_`;
+      resultMessage += `_Untuk membuat grup lagi, gunakan /buat [nama] [jumlah]_\n`;
+      resultMessage += `_Atau kirim foto dengan caption untuk menggunakan sebagai foto profil_`;
     }
     
     await bot.editMessageText(resultMessage, {
@@ -450,6 +543,7 @@ bot.onText(/\/start/, (msg) => {
     `🔹 /logout - Putuskan koneksi WhatsApp\n` +
     `🔹 /status - Cek status koneksi\n` +
     `🔹 /reconnect - Paksa reconnect jika ada masalah\n\n` +
+    `*Fitur Baru:* Kirim foto dengan caption /buat [nama grup] [jumlah] untuk menggunakan foto sebagai profil grup\n\n` +
     `_Made with ❤️ by @ZOWIV0_`,
     { parse_mode: 'Markdown' }
   );
@@ -644,7 +738,8 @@ bot.onText(/\/status/, async (msg) => {
       `📱 Nomor: +${sock.user.id.split(':')[0]}\n` +
       `👤 Nama: ${sock.user.name}\n` +
       `🔢 Jumlah Chat: ${Object.keys(sock.chats).length}\n\n` +
-      `Kamu bisa membuat grup dengan /buat [nama] [jumlah]`,
+      `Kamu bisa membuat grup dengan /buat [nama] [jumlah]\n` +
+      `Atau kirim foto dengan caption untuk menggunakan sebagai foto profil grup`,
       { parse_mode: 'Markdown' }
     );
   } catch (error) {
@@ -659,8 +754,8 @@ bot.onText(/\/status/, async (msg) => {
   }
 });
 
-// Menangani perintah /buat
-bot.onText(/\/buat (.+)/, async (msg, match) => {
+// Menangani perintah /buat baik dari text command atau caption foto
+async function handleCreateGroupCommand(msg, match, photoPath = null) {
   const userId = msg.from.id;
   const params = match[1].trim().split(' ');
   
@@ -742,12 +837,64 @@ bot.onText(/\/buat (.+)/, async (msg, match) => {
       await new Promise(resolve => setTimeout(resolve, 3000));
     }
     
-    await createWhatsAppGroups(userId, groupName, count);
+    // Simpan path foto di userData jika ada
+    if (photoPath) {
+      userData.profilePic = photoPath;
+      activeUsers.set(userId, userData);
+    }
+    
+    // Buat grup dengan foto profil jika ada
+    await createWhatsAppGroups(userId, groupName, count, photoPath);
   } catch (error) {
     console.error('Error buat grup:', error);
     bot.sendMessage(
       userId,
       `❌ *Gagal membuat grup!*\n\nError: ${error.message}\n\nCoba connect ulang dengan /logout lalu /connect`,
+      { parse_mode: 'Markdown' }
+    );
+  }
+}
+
+// Menangani perintah /buat (text command)
+bot.onText(/\/buat (.+)/, async (msg, match) => {
+  // Ini hanya untuk perintah text, bukan caption foto
+  if (msg.photo) return;
+  
+  await handleCreateGroupCommand(msg, match);
+});
+
+// Menangani foto dengan caption /buat
+bot.on('photo', async (msg) => {
+  const caption = msg.caption;
+  if (!caption) return;
+  
+  // Cek apakah caption dimulai dengan /buat
+  const match = caption.match(/^\/buat (.+)/);
+  if (!match) return;
+  
+  const userId = msg.from.id;
+  
+  try {
+    // Pilih foto dengan resolusi tertinggi
+    const photoId = msg.photo[msg.photo.length - 1].file_id;
+    
+    // Kirim pesan sedang memproses
+    bot.sendMessage(
+      userId,
+      `🖼️ *Foto diterima!*\n\nSedang memproses foto...\nTunggu sebentar ya.`,
+      { parse_mode: 'Markdown' }
+    );
+    
+    // Download foto dari Telegram
+    const photoPath = await downloadTelegramPhoto(photoId, userId);
+    
+    // Proses perintah pembuatan grup dengan foto
+    await handleCreateGroupCommand(msg, match, photoPath);
+  } catch (error) {
+    console.error('Error proses foto:', error);
+    bot.sendMessage(
+      userId,
+      `❌ *Gagal memproses foto!*\n\nError: ${error.message}\n\nCoba lagi nanti.`,
       { parse_mode: 'Markdown' }
     );
   }
@@ -792,6 +939,57 @@ bot.on('callback_query', async (callbackQuery) => {
   }
 });
 
+// Bersihkan foto profil yang tidak terpakai (setiap 1 jam)
+setInterval(() => {
+  try {
+    // Hapus foto yang lebih dari 1 jam (3600000 ms)
+    const timeThreshold = Date.now() - 3600000;
+    
+    // Cek setiap folder user
+    if (fs.existsSync(profilePicsDir)) {
+      fs.readdirSync(profilePicsDir).forEach(userId => {
+        const userDir = path.join(profilePicsDir, userId);
+        
+        if (fs.statSync(userDir).isDirectory()) {
+          fs.readdirSync(userDir).forEach(file => {
+            const filePath = path.join(userDir, file);
+            
+            // Cek apakah ini file gambar (bukan folder)
+            if (fs.statSync(filePath).isFile() && 
+                (file.endsWith('.jpg') || file.endsWith('.png') || file.endsWith('.jpeg'))) {
+              
+              // Cek waktu modifikasi
+              const fileStats = fs.statSync(filePath);
+              if (fileStats.mtimeMs < timeThreshold) {
+                // File lebih dari 1 jam, hapus
+                try {
+                  fs.unlinkSync(filePath);
+                  console.log(`Hapus foto lama: ${filePath}`);
+                } catch (e) {
+                  console.log(`Error hapus foto lama ${filePath}:`, e);
+                }
+              }
+            }
+          });
+          
+          // Hapus folder jika kosong
+          try {
+            const files = fs.readdirSync(userDir);
+            if (files.length === 0) {
+              fs.rmdirSync(userDir);
+              console.log(`Hapus folder kosong: ${userDir}`);
+            }
+          } catch (e) {
+            console.log(`Error hapus folder kosong ${userDir}:`, e);
+          }
+        }
+      });
+    }
+  } catch (error) {
+    console.log('Error bersihkan foto:', error);
+  }
+}, 3600000); // Setiap 1 jam
+
 // Tambahkan ping interval untuk menjaga koneksi
 setInterval(() => {
   // Ping semua koneksi aktif
@@ -809,25 +1007,3 @@ setInterval(() => {
 
 // Mulai bot
 console.log('Bot Telegram pembuat grup WhatsApp telah aktif! 🚀');
-
-// Tambahkan file package.json
-/**
- * Untuk package.json:
- * 
- * {
- *   "name": "telegram-wa-group-creator",
- *   "version": "1.0.0",
- *   "description": "Bot Telegram untuk membuat grup WhatsApp",
- *   "main": "index.js",
- *   "scripts": {
- *     "start": "node index.js"
- *   },
- *   "dependencies": {
- *     "@hapi/boom": "^10.0.1",
- *     "@whiskeysockets/baileys": "^6.5.0",
- *     "node-telegram-bot-api": "^0.64.0",
- *     "pino": "^8.16.0",
- *     "qrcode": "^1.5.3"
- *   }
- * }
- */
