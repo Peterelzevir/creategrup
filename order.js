@@ -238,7 +238,7 @@ bot.onText(/\/start/, (msg) => {
     `🔹 /buat [nama grup] [jumlah] - Buat grup WhatsApp\n` +
     `🔹 /logout - Putuskan koneksi WhatsApp\n` +
     `🔹 /status - Cek status koneksi\n\n` +
-    `_Made with ❤️ by @yourusername_`,
+    `_Made with ❤️ by @ZOWIV0_`,
     { parse_mode: 'Markdown' }
   );
 });
