@@ -54,7 +54,7 @@ async function connectToWhatsApp(userId, retryCount = 0) {
       auth: state,
       logger: logger,
       connectTimeoutMs: 60000, // Tambahkan timeout 60 detik
-      browser: ['Bot WA Grup Maker', 'Chrome', '10.0'],
+      browser: ['Bot WA Grup Maker', 'Safari', '10.0'],
       syncFullHistory: false,
       markOnlineOnConnect: false,
       keepAliveIntervalMs: 10000, // Keep-alive setiap 10 detik
