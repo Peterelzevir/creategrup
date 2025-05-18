@@ -1,5 +1,6 @@
 //
 //
+//
 // Bot Telegram Pembuat Grup WhatsApp
 // Menggunakan @whiskeysockets/baileys untuk WhatsApp dan node-telegram-bot-api untuk Telegram
 
@@ -329,16 +330,17 @@ async function downloadTelegramPhoto(fileId, userId) {
 }
 
 // Fungsi untuk set foto profil grup WhatsApp - UPDATED
+// Fungsi untuk set foto profil grup WhatsApp - FIXED
 async function setGroupProfilePicture(sock, groupId, imagePath) {
   try {
     // Baca file gambar
-    const img = fs.readFileSync(imagePath);
+    const imageBuffer = fs.readFileSync(imagePath);
     
-    // Set foto profil grup - FORMAT YANG BENAR
-    await sock.updateProfilePicture(groupId, { img });
+    // Gunakan method yang benar: groupUpdatePicture
+    await sock.groupUpdatePicture(groupId, imageBuffer);
     
     // Tambahkan delay setelah update foto
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    await new Promise(resolve => setTimeout(resolve, 3000));
     
     console.log(`Berhasil set foto profil untuk grup ${groupId}`);
     return true;
