@@ -330,23 +330,63 @@ async function downloadTelegramPhoto(fileId, userId) {
 }
 
 // Fungsi untuk set foto profil grup WhatsApp - UPDATED
-// Fungsi untuk set foto profil grup WhatsApp - FIXED
+// Fungsi untuk set foto profil grup WhatsApp - RAW APPROACH
 async function setGroupProfilePicture(sock, groupId, imagePath) {
   try {
     // Baca file gambar
     const imageBuffer = fs.readFileSync(imagePath);
     
-    // Gunakan method yang benar: groupUpdatePicture
-    await sock.groupUpdatePicture(groupId, imageBuffer);
+    // Coba dengan pendekatan level lebih rendah menggunakan WAProto
+    const { prepareWAMessageMedia, generateWAMessageFromContent } = require('@whiskeysockets/baileys');
     
-    // Tambahkan delay setelah update foto
+    const msg = await prepareWAMessageMedia(
+      { image: imageBuffer },
+      { upload: sock.waUploadToServer }
+    );
+    
+    // Kirim pesan dengan perintah set profile picture
+    await sock.query({
+      tag: 'iq',
+      attrs: {
+        to: groupId,
+        type: 'set',
+        xmlns: 'w:profile:picture'
+      },
+      content: [
+        {
+          tag: 'picture',
+          attrs: { type: 'image' },
+          content: msg.imageMessage
+        }
+      ]
+    });
+    
+    // Tambahkan delay
     await new Promise(resolve => setTimeout(resolve, 3000));
     
     console.log(`Berhasil set foto profil untuk grup ${groupId}`);
     return true;
   } catch (error) {
-    console.error(`Error set profil grup ${groupId}:`, error);
-    return false;
+    console.error(`Error set profil grup ${groupId} (raw approach):`, error);
+    
+    // Jika pendekatan raw gagal, coba dengan metode alternatif
+    try {
+      console.log("Mencoba metode alternatif...");
+      
+      // Baca file gambar lagi
+      const img = fs.readFileSync(imagePath);
+      
+      // Coba dengan perintah langsung
+      await sock.sendMessage(groupId, { 
+        image: img, 
+        caption: '!setgpfp'  // Beberapa bot menggunakan perintah ini
+      });
+      
+      return true;
+    } catch (err) {
+      console.error(`Error metode alternatif:`, err);
+      return false;
+    }
   }
 }
 
