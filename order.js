@@ -1,4 +1,5 @@
 //
+//
 // Bot Telegram Pembuat Grup WhatsApp
 // Menggunakan @whiskeysockets/baileys untuk WhatsApp dan node-telegram-bot-api untuk Telegram
 
@@ -327,14 +328,19 @@ async function downloadTelegramPhoto(fileId, userId) {
   }
 }
 
-// Fungsi untuk set foto profil grup WhatsApp
+// Fungsi untuk set foto profil grup WhatsApp - UPDATED
 async function setGroupProfilePicture(sock, groupId, imagePath) {
   try {
     // Baca file gambar
     const img = fs.readFileSync(imagePath);
     
-    // Set foto profil grup
-    await sock.updateProfilePicture(groupId, img);
+    // Set foto profil grup - FORMAT YANG BENAR
+    await sock.updateProfilePicture(groupId, { img });
+    
+    // Tambahkan delay setelah update foto
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    
+    console.log(`Berhasil set foto profil untuk grup ${groupId}`);
     return true;
   } catch (error) {
     console.error(`Error set profil grup ${groupId}:`, error);
@@ -412,13 +418,23 @@ async function createWhatsAppGroups(userId, groupName, count, profilePicPath = n
               }
             );
             
-            // Tunggu sebentar sebelum set foto profil
-            await new Promise(resolve => setTimeout(resolve, 1000));
+            // Tunggu lebih lama sebelum set foto profil (3 detik)
+            await new Promise(resolve => setTimeout(resolve, 3000));
             
-            // Set foto profil
-            const setPicResult = await setGroupProfilePicture(sock, group.id, profilePicPath);
-            if (!setPicResult) {
-              console.log(`Gagal set profil untuk grup ${fullGroupName}`);
+            // Set foto profil dengan mencoba beberapa kali jika gagal
+            let setPicSuccess = false;
+            for (let attempt = 1; attempt <= 3 && !setPicSuccess; attempt++) {
+              console.log(`Mencoba set profil grup ${fullGroupName} (percobaan ${attempt})`);
+              setPicSuccess = await setGroupProfilePicture(sock, group.id, profilePicPath);
+              
+              if (!setPicSuccess && attempt < 3) {
+                // Tunggu sebelum mencoba lagi
+                await new Promise(resolve => setTimeout(resolve, 2000));
+              }
+            }
+            
+            if (!setPicSuccess) {
+              console.log(`Gagal set profil untuk grup ${fullGroupName} setelah beberapa percobaan`);
             }
           }
           
